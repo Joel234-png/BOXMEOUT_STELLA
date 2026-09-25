@@ -170,12 +170,13 @@ pub fn emit_protocol_unpaused(env: &Env) {
 mod tests {
     use soroban_sdk::{
         contract, contractimpl,
-        testutils::{Address as _, Events},
+        testutils::Address as _,
         Address, Env, Symbol, TryFromVal,
     };
 
     use crate::{
         events::*,
+        test_utils::{event_at, event_count},
         types::{BetRecord, BetSide, ClaimReceipt, Outcome},
     };
 
@@ -200,11 +201,12 @@ mod tests {
     }
 
     /// Returns the sole event emitted.
+    /// Returns the sole event emitted as `((), topics, data)`.
     macro_rules! sole_event {
         ($env:expr) => {{
-            let all = $env.events().all();
-            assert_eq!(all.len(), 1, "expected exactly 1 event");
-            all.get(0).unwrap()
+            assert_eq!(event_count(&$env), 1, "expected exactly 1 event");
+            let (topics, data) = event_at(&$env, 0);
+            ((), topics, data)
         }};
     }
 
@@ -291,10 +293,9 @@ mod tests {
         let (env, id) = env();
         let bettor = addr(&env);
         let receipt = ClaimReceipt {
+            bet_id: soroban_sdk::Bytes::from_array(&env, &[7u8; 32]),
             bettor: bettor.clone(),
-            market_id: 5,
-            amount_won: 9_800_000,
-            fee_deducted: 200_000,
+            payout: 9_800_000,
             claimed_at: 2_000_000,
         };
         env.as_contract(&id, || { emit_winnings_claimed(&env, 5, receipt.clone()); });
@@ -303,8 +304,8 @@ mod tests {
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "winnings_claimed"));
         let ev_receipt: ClaimReceipt = TryFromVal::try_from_val(&env, &ev.2).unwrap();
         assert_eq!(ev_receipt.bettor, bettor);
-        assert_eq!(ev_receipt.amount_won, 9_800_000);
-        assert_eq!(ev_receipt.fee_deducted, 200_000);
+        assert_eq!(ev_receipt.payout, 9_800_000);
+        assert_eq!(ev_receipt.claimed_at, 2_000_000);
     }
 
     // ── refund_claimed ───────────────────────────────────────────────────────
