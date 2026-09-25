@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 2,
+    "address": 1,
     "nonce": 0,
     "mux_id": 0
   },
@@ -67,71 +67,14 @@
           "v0": {
             "topics": [
               {
-                "symbol": "bet_placed"
+                "symbol": "resolution_finalized"
               },
               {
-                "u64": "4"
+                "u64": "12"
               }
             ],
             "data": {
-              "map": [
-                {
-                  "key": {
-                    "symbol": "amount"
-                  },
-                  "val": {
-                    "i128": "5000000"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "bet_id"
-                  },
-                  "val": {
-                    "bytes": "0404040404040404040404040404040404040404040404040404040404040404"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "bettor"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "claimed"
-                  },
-                  "val": {
-                    "bool": false
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "market_id"
-                  },
-                  "val": {
-                    "u64": "4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "placed_at"
-                  },
-                  "val": {
-                    "u64": "1000"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "side"
-                  },
-                  "val": {
-                    "u32": 1
-                  }
-                }
-              ]
+              "u64": "7777"
             }
           }
         }

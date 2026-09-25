@@ -67,69 +67,19 @@
           "v0": {
             "topics": [
               {
-                "symbol": "bet_placed"
+                "symbol": "resolution_disputed"
               },
               {
-                "u64": "4"
+                "u64": "10"
               }
             ],
             "data": {
-              "map": [
+              "vec": [
                 {
-                  "key": {
-                    "symbol": "amount"
-                  },
-                  "val": {
-                    "i128": "5000000"
-                  }
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "key": {
-                    "symbol": "bet_id"
-                  },
-                  "val": {
-                    "bytes": "0404040404040404040404040404040404040404040404040404040404040404"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "bettor"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "claimed"
-                  },
-                  "val": {
-                    "bool": false
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "market_id"
-                  },
-                  "val": {
-                    "u64": "4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "placed_at"
-                  },
-                  "val": {
-                    "u64": "1000"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "side"
-                  },
-                  "val": {
-                    "u32": 1
-                  }
+                  "bytes": "77726f6e672077696e6e6572"
                 }
               ]
             }

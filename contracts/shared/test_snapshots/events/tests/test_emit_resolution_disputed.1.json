@@ -79,7 +79,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "string": "oracle_error"
+                  "bytes": "6f7261636c655f6572726f72"
                 }
               ]
             }

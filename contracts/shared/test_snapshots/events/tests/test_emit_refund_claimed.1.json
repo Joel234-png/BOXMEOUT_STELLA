@@ -79,6 +79,9 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
+                  "bytes": "0606060606060606060606060606060606060606060606060606060606060606"
+                },
+                {
                   "i128": "5000000"
                 }
               ]
