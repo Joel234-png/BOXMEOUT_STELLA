@@ -16,7 +16,7 @@ Manages accumulated protocol fees and implements fee collection/withdrawal logic
 - `get_balance()` - Current escrow balance
 - `get_fee_bps()` - Current fee rate
 - `get_total_fees_earned()` - Lifetime fees
-- `get_withdrawal_log()` - History of withdrawals
+- `get_withdrawal_log()` - Last 50 withdrawals (ring buffer; events hold the full history)
 
 ### Market
 Manages individual boxing prediction markets, bet placement, and claim resolution.

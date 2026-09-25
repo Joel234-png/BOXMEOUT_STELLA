@@ -4,6 +4,11 @@ use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Symbol, Vec,
 };
 
+/// Maximum number of entries kept in `WITHDRAWAL_LOG`. Older entries are
+/// evicted first; the `fee_withdrawn` / `EmrgDrain` events remain the
+/// complete audit trail.
+pub const MAX_WITHDRAWAL_LOG_ENTRIES: u32 = 50;
+
 /// Length of the withdrawal-limit window, in seconds.
 pub const WITHDRAWAL_WINDOW_SECS: u64 = 24 * 60 * 60;
 
@@ -15,7 +20,7 @@ pub const WITHDRAWAL_WINDOW_SECS: u64 = 24 * 60 * 60;
 // "FEE_RECIPIENT"   -> Address
 // "BALANCE"         -> i128
 // "TOTAL_FEES"      -> i128
-// "WITHDRAWAL_LOG"  -> Vec<(Address, i128, u64)>
+// "WITHDRAWAL_LOG"  -> Vec<(Address, i128, u64)>  (last MAX_WITHDRAWAL_LOG_ENTRIES only)
 // "DAILY_LIMIT"     -> i128 (max withdraw_fees total per window)
 // "WINDOW_START"    -> u64  (ledger timestamp the current window opened)
 // "WINDOW_SPENT"    -> i128 (withdraw_fees total inside the current window)
@@ -62,6 +67,21 @@ fn key_window_start(env: &Env) -> Symbol {
 
 fn key_window_spent(env: &Env) -> Symbol {
     Symbol::new(env, "WINDOW_SPENT")
+}
+
+/// Appends a withdrawal to `WITHDRAWAL_LOG`, evicting the oldest entries so
+/// the log never holds more than `MAX_WITHDRAWAL_LOG_ENTRIES`.
+fn append_withdrawal_log(env: &Env, recipient: &Address, amount: i128, ts: u64) {
+    let mut log: Vec<(Address, i128, u64)> = env
+        .storage()
+        .persistent()
+        .get(&key_wlog(env))
+        .unwrap_or(Vec::new(env));
+    while log.len() >= MAX_WITHDRAWAL_LOG_ENTRIES {
+        log.pop_front();
+    }
+    log.push_back((recipient.clone(), amount, ts));
+    env.storage().persistent().set(&key_wlog(env), &log);
 }
 
 fn read_admin(env: &Env) -> Address {
@@ -371,13 +391,7 @@ impl Treasury {
         );
 
         let ts = env.ledger().timestamp();
-        let mut log: Vec<(Address, i128, u64)> = env
-            .storage()
-            .persistent()
-            .get(&key_wlog(&env))
-            .unwrap_or(Vec::new(&env));
-        log.push_back((recipient.clone(), amount, ts));
-        env.storage().persistent().set(&key_wlog(&env), &log);
+        append_withdrawal_log(&env, &recipient, amount, ts);
 
         env.events().publish(
             (Symbol::new(&env, "FeesWithdrawn"),),
@@ -453,13 +467,7 @@ impl Treasury {
             .set(&key_balance(&env), &0i128);
 
         let ts = env.ledger().timestamp();
-        let mut log: Vec<(Address, i128, u64)> = env
-            .storage()
-            .persistent()
-            .get(&key_wlog(&env))
-            .unwrap_or(Vec::new(&env));
-        log.push_back((recipient.clone(), amount, ts));
-        env.storage().persistent().set(&key_wlog(&env), &log);
+        append_withdrawal_log(&env, &recipient, amount, ts);
 
         env.events().publish(
             (symbol_short!("EmrgDrain"),),
@@ -515,15 +523,18 @@ impl Treasury {
             .unwrap_or(0)
     }
 
-    /// Returns the complete log of all past withdrawals from the treasury.
+    /// Returns the most recent withdrawals from the treasury.
     ///
-    /// Each entry is a tuple of `(recipient, amount, timestamp)`. Read-only —
-    /// does not modify state.
+    /// The log is a ring buffer holding at most `MAX_WITHDRAWAL_LOG_ENTRIES`
+    /// entries from `withdraw_fees` and `emergency_drain`; once full, each new
+    /// withdrawal evicts the oldest entry. It is a convenience view, not the
+    /// audit trail — index the withdrawal events for full history.
+    /// Read-only — does not modify state.
     ///
     /// # Returns
     ///
-    /// Returns a [`Vec`] of `(Address, i128, u64)` tuples, one per withdrawal,
-    /// in the order they occurred. Returns an empty `Vec` if no withdrawals have occurred.
+    /// Returns a [`Vec`] of `(recipient, amount, timestamp)` tuples, oldest
+    /// first. Returns an empty `Vec` if no withdrawals have occurred.
     pub fn get_withdrawal_log(env: Env) -> Vec<(Address, i128, u64)> {
         env.storage()
             .persistent()

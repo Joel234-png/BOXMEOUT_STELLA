@@ -579,7 +579,7 @@ paused             bool
 | `emergency_drain` | admin | Drains all funds. Only callable when protocol is paused. |
 | `get_balance` | — | Returns current XLM balance in stroops. |
 | `get_total_fees_earned` | — | Returns lifetime cumulative fees. |
-| `get_withdrawal_log` | — | Returns log of all past withdrawals. |
+| `get_withdrawal_log` | — | Returns the last 50 withdrawals (oldest first); older entries are evicted. Use withdrawal events for full history. |
 
 ---
 
