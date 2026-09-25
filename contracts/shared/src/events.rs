@@ -151,6 +151,15 @@ pub fn emit_config_updated(env: &Env, param_name: String, new_value: i128) {
     env.events().publish(topics, (param_name, new_value));
 }
 
+/// Emits a `daily_limit_updated` event when the treasury daily withdrawal limit changes.
+///
+/// Topics: `(Symbol("daily_limit_updated"),)`
+/// Data:   `(old_limit, new_limit)`
+pub fn emit_daily_limit_updated(env: &Env, old_limit: i128, new_limit: i128) {
+    let topics = (Symbol::new(env, "daily_limit_updated"),);
+    env.events().publish(topics, (old_limit, new_limit));
+}
+
 /// Emits a `conflicting_oracle_report` event when two oracles disagree on the outcome.
 ///
 /// Topics: `(Symbol("conflicting_oracle_report"), market_id)`
@@ -461,6 +470,20 @@ mod tests {
             TryFromVal::try_from_val(&env, &ev.2).unwrap();
         assert_eq!(ev_param, str(&env, "fee_bps"));
         assert_eq!(ev_value, 300_i128);
+    }
+
+    // ── daily_limit_updated ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_emit_daily_limit_updated() {
+        let (env, id) = env();
+        env.as_contract(&id, || { emit_daily_limit_updated(&env, 1_000, 2_500); });
+
+        let ev = sole_event!(env);
+        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "daily_limit_updated"));
+        let (old, new): (i128, i128) = TryFromVal::try_from_val(&env, &ev.2).unwrap();
+        assert_eq!(old, 1_000);
+        assert_eq!(new, 2_500);
     }
 
     // ── resolution_disputed ──────────────────────────────────────────────────

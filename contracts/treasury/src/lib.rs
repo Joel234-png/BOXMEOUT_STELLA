@@ -1,8 +1,11 @@
 #![no_std]
-use shared::types::ProtocolConfig;
+use shared::{events, types::ProtocolConfig, ContractError};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Symbol, Vec,
 };
+
+/// Length of the withdrawal-limit window, in seconds.
+pub const WITHDRAWAL_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // "ADMIN"           -> Address
@@ -13,6 +16,9 @@ use soroban_sdk::{
 // "BALANCE"         -> i128
 // "TOTAL_FEES"      -> i128
 // "WITHDRAWAL_LOG"  -> Vec<(Address, i128, u64)>
+// "DAILY_LIMIT"     -> i128 (max withdraw_fees total per window)
+// "WINDOW_START"    -> u64  (ledger timestamp the current window opened)
+// "WINDOW_SPENT"    -> i128 (withdraw_fees total inside the current window)
 
 fn key_admin(env: &Env) -> Symbol {
     Symbol::new(env, "ADMIN")
@@ -46,6 +52,36 @@ fn key_wlog(env: &Env) -> Symbol {
     Symbol::new(env, "WITHDRAWAL_LOG")
 }
 
+fn key_daily_limit(env: &Env) -> Symbol {
+    Symbol::new(env, "DAILY_LIMIT")
+}
+
+fn key_window_start(env: &Env) -> Symbol {
+    Symbol::new(env, "WINDOW_START")
+}
+
+fn key_window_spent(env: &Env) -> Symbol {
+    Symbol::new(env, "WINDOW_SPENT")
+}
+
+fn read_admin(env: &Env) -> Address {
+    env.storage()
+        .persistent()
+        .get(&key_admin(env))
+        .expect("not initialized")
+}
+
+/// Returns `(window_start, spent)` for the window containing `now`.
+/// A window that has run for `WITHDRAWAL_WINDOW_SECS` or longer is treated
+/// as expired: a fresh window opens at `now` with nothing spent.
+fn current_window(env: &Env, now: u64) -> (u64, i128) {
+    let start: u64 = env.storage().persistent().get(&key_window_start(env)).unwrap_or(0);
+    if now >= start.saturating_add(WITHDRAWAL_WINDOW_SECS) {
+        return (now, 0);
+    }
+    let spent: i128 = env.storage().persistent().get(&key_window_spent(env)).unwrap_or(0);
+    (start, spent)
+}
 #[contract]
 pub struct Treasury;
 
@@ -65,12 +101,14 @@ impl Treasury {
     /// * `fee_recipient` - Address that receives protocol fees.
     /// * `factory` - Address of the `MarketFactory` contract.
     /// * `token` - Address of the XLM token contract.
+    /// * `daily_limit` - Maximum total `withdraw_fees` amount per 24h window, in stroops.
     ///
     /// # Panics
     ///
     /// Panics if:
     /// - The treasury has already been initialized.
     /// - `fee_bps` exceeds 1000 (10%).
+    /// - `daily_limit` is not positive.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -78,6 +116,7 @@ impl Treasury {
         fee_recipient: Address,
         factory: Address,
         token: Address,
+        daily_limit: i128,
     ) {
         if env.storage().persistent().has(&key_admin(&env)) {
             panic!("already initialized");
@@ -86,6 +125,9 @@ impl Treasury {
         // Validate fee_bps does not exceed 10% (1000 basis points)
         if fee_bps > 1000 {
             panic!("fee_bps exceeds maximum of 1000 (10%)");
+        }
+        if daily_limit <= 0 {
+            panic!("daily_limit must be positive");
         }
 
         env.storage().persistent().set(&key_admin(&env), &admin);
@@ -102,6 +144,38 @@ impl Treasury {
         env.storage()
             .persistent()
             .set(&key_wlog(&env), &Vec::<(Address, i128, u64)>::new(&env));
+        env.storage().persistent().set(&key_daily_limit(&env), &daily_limit);
+        env.storage()
+            .persistent()
+            .set(&key_window_start(&env), &env.ledger().timestamp());
+        env.storage().persistent().set(&key_window_spent(&env), &0i128);
+    }
+
+    /// Updates the daily withdrawal limit enforced by `withdraw_fees`.
+    ///
+    /// Takes effect immediately for the current window: amounts already
+    /// withdrawn in the window still count against the new limit.
+    /// Emits a `daily_limit_updated` event with `(old_limit, new_limit)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `admin` has not authorized the call, is not the stored admin,
+    /// or `new_limit` is not positive.
+    pub fn set_daily_limit(env: Env, admin: Address, new_limit: i128) {
+        admin.require_auth();
+        if read_admin(&env) != admin {
+            panic!("not admin");
+        }
+        if new_limit <= 0 {
+            panic!("daily_limit must be positive");
+        }
+        let old_limit: i128 = env
+            .storage()
+            .persistent()
+            .get(&key_daily_limit(&env))
+            .expect("not initialized");
+        env.storage().persistent().set(&key_daily_limit(&env), &new_limit);
+        events::emit_daily_limit_updated(&env, old_limit, new_limit);
     }
 
     /// Escrows a bettor's stake on behalf of a registered `Market` contract.
@@ -229,6 +303,11 @@ impl Treasury {
     /// Validates that `amount ≤ BALANCE` and deducts it before transferring XLM.
     /// Appends an entry to `WITHDRAWAL_LOG`. Emits a `FeesWithdrawn` event.
     ///
+    /// Withdrawals are capped at `DAILY_LIMIT` per window. A window opens at the
+    /// first withdrawal after the previous window has run for 24h (by ledger
+    /// timestamp) and accumulates every withdrawal made until it expires, so a
+    /// compromised admin key can move at most `DAILY_LIMIT` per 24h.
+    ///
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
@@ -240,18 +319,33 @@ impl Treasury {
     ///
     /// Panics if:
     /// - `admin` has not authorized the call.
+    /// - `amount` is not positive.
     /// - `amount` exceeds the current `BALANCE`.
+    /// - `amount` would take the current window's total above `DAILY_LIMIT`
+    ///   (`ContractError::DailyWithdrawalLimitExceeded`).
     pub fn withdraw_fees(env: Env, admin: Address, recipient: Address, amount: i128) {
         admin.require_auth();
 
-        let stored_admin: Address = env
-            .storage()
-            .persistent()
-            .get(&key_admin(&env))
-            .expect("not initialized");
-        if stored_admin != admin {
+        if read_admin(&env) != admin {
             panic!("not admin");
         }
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+
+        let now = env.ledger().timestamp();
+        let daily_limit: i128 = env
+            .storage()
+            .persistent()
+            .get(&key_daily_limit(&env))
+            .expect("not initialized");
+        let (window_start, spent) = current_window(&env, now);
+        let new_spent = spent.checked_add(amount).expect("window total overflow");
+        if new_spent > daily_limit {
+            panic_with_error!(&env, ContractError::DailyWithdrawalLimitExceeded);
+        }
+        env.storage().persistent().set(&key_window_start(&env), &window_start);
+        env.storage().persistent().set(&key_window_spent(&env), &new_spent);
 
         let balance: i128 = env
             .storage()
@@ -390,6 +484,23 @@ impl Treasury {
             .unwrap_or(0)
     }
 
+    /// Returns the configured daily withdrawal limit, in stroops.
+    pub fn get_daily_limit(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&key_daily_limit(&env))
+            .expect("not initialized")
+    }
+
+    /// Returns how much more `withdraw_fees` can move before the current
+    /// window's limit is reached. Reflects a window reset if the current
+    /// window has already expired.
+    pub fn get_remaining_daily_limit(env: Env) -> i128 {
+        let limit = Self::get_daily_limit(env.clone());
+        let (_, spent) = current_window(&env, env.ledger().timestamp());
+        (limit - spent).max(0)
+    }
+
     /// Returns lifetime cumulative fees collected.
     ///
     /// Read-only — does not modify state.
@@ -468,7 +579,7 @@ mod tests {
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token);
+        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token, &1_000_000i128);
 
         assert_eq!(client.get_balance(), 0);
         assert_eq!(client.get_total_fees_earned(), 0);
@@ -489,8 +600,8 @@ mod tests {
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token);
-        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token); // must panic
+        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token, &1_000_000i128);
+        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token, &1_000_000i128); // must panic
     }
 
     #[test]
@@ -505,7 +616,7 @@ mod tests {
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &1001u32, &fee_recipient, &factory, &token);
+        client.initialize(&admin, &1001u32, &fee_recipient, &factory, &token, &1_000_000i128);
     }
 
     #[test]
@@ -519,7 +630,7 @@ mod tests {
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &1000u32, &fee_recipient, &factory, &token);
+        client.initialize(&admin, &1000u32, &fee_recipient, &factory, &token, &1_000_000i128);
         assert_eq!(client.get_fee_bps(), 1000);
     }
 
@@ -542,7 +653,7 @@ mod tests {
         let token_addr = shared::test_utils::fund_address(env, &contract_id, balance);
 
         let client = TreasuryClient::new(env, &contract_id);
-        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token_addr);
+        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token_addr, &1_000_000i128);
 
         // Seed BALANCE via a direct storage write so we don't need the full
         // deposit_fees machinery (which requires a registered market).
