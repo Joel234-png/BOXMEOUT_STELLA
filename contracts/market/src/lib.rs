@@ -7,6 +7,7 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 use types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketResolved, MarketStatus, Outcome, ProtocolConfig, WinningsClaimed};
+use shared::errors::ContractError;
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // DataKey::MarketInfo     -> Market
@@ -67,11 +68,11 @@ impl MarketContract {
     /// * `treasury` - Address of the `Treasury` contract used to escrow bet funds.
     /// * `bet_token` - Address of the token contract accepted for bets on this market.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if:
-    /// - The market has already been initialized.
-    /// - `betting_ends_at` (lock time) is after `scheduled_at` (end time).
+    /// Returns:
+    /// - `ContractError::AlreadyInitialized` if the market has already been initialized.
+    /// - `ContractError::InvalidTimestamp` if `betting_ends_at` (lock time) is after `scheduled_at` (end time).
     pub fn initialize(
         env: Env,
         market_id: Bytes,
@@ -86,12 +87,12 @@ impl MarketContract {
         dispute_window_sec: u64,
         treasury: Address,
         bet_token: Address,
-    ) {
+    ) -> Result<(), ContractError> {
         if env.storage().persistent().has(&DataKey::MarketInfo) {
-            panic!("already initialized");
+            return Err(ContractError::AlreadyInitialized);
         }
         if betting_ends_at > scheduled_at {
-            panic!("lock time must be at or before end time");
+            return Err(ContractError::InvalidTimestamp);
         }
         let market = Market {
             market_id: market_id.clone(),
@@ -124,6 +125,7 @@ impl MarketContract {
             (Symbol::new(&env, "market_created"), market_id),
             market,
         );
+        Ok(())
     }
 
     /// Places a bet on a fighter in this market.
@@ -155,39 +157,40 @@ impl MarketContract {
         bettor: Address,
         side: BetSide,
         amount: i128,
-    ) -> Bytes {
+    ) -> Result<Bytes, ContractError> {
         bettor.require_auth();
 
         let mut market = Self::read_market(&env);
 
         if market.status != MarketStatus::Open {
-            panic!("market not open");
+            return Err(ContractError::InvalidMarketStatus);
         }
         if env.ledger().timestamp() >= market.betting_ends_at {
-            panic!("betting period has ended");
+            return Err(ContractError::BettingClosed);
         }
 
         let factory: Address = env.storage().persistent()
             .get(&DataKey::Factory)
             .expect("factory not set");
-        let config: ProtocolConfig = env.invoke_contract(
+        let config: Result<ProtocolConfig, ContractError> = env.invoke_contract(
             &factory,
             &Symbol::new(&env, "get_config"),
             soroban_sdk::vec![&env],
         );
+        let config = config?;
 
         // Prevent dust bets that consume on-chain storage without contributing
         // meaningful opposing liquidity. The configured min_bet_amount is checked
         // before any escrow transfer or state mutation.
         if amount < config.min_bet_amount {
-            panic!("below minimum bet");
+            return Err(ContractError::BetTooSmall);
         }
         if amount > config.max_bet_amount {
-            panic!("above maximum bet");
+            return Err(ContractError::BetTooLarge);
         }
 
         if amount <= 0 {
-            panic!("amount must be positive");
+            return Err(ContractError::BetTooSmall);
         }
 
         // Escrow the bet amount via the Treasury. This is a cross-contract call

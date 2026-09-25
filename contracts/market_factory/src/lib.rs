@@ -3,9 +3,9 @@
 //! BOXMEOUT — MarketFactory Contract
 //! Deploys and tracks Market contract instances.
 //! ============================================================
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Map, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Map, String, Symbol, Vec};
 
-use shared::{errors::ContractError, types::MarketInfo};
+use shared::{errors::ContractError, types::{MarketInfo, ProtocolConfig}};
 
 // Storage keys for persistent state
 const ADMIN: &str = "ADMIN";
@@ -15,6 +15,7 @@ const PAUSED: &str = "PAUSED";
 const MARKET_COUNT_KEY: &str = "MARKET_COUNT";
 const MARKET_MAP: &str = "MARKET_MAP";
 const ALL_MARKETS_KEY: &str = "ALL_MARKETS";
+const CONFIG_KEY: &str = "CONFIG";
 
 /// Maximum number of markets that may be returned in a single `list_markets` /
 /// `list_active_markets` page, regardless of the caller-requested `limit`.
@@ -35,15 +36,31 @@ impl MarketFactory {
         admin: Address,
         market_wasm_hash: BytesN<32>,
         treasury: Address,
+        fee_collector: Address,
+        default_fee_bp: u32,
+        min_bet_amount: i128,
+        max_bet_amount: i128,
+        dispute_window_sec: u64,
     ) -> Result<(), ContractError> {
         if env.storage().persistent().has(&ADMIN) {
             return Err(ContractError::AlreadyInitialized);
         }
 
+        let config = ProtocolConfig {
+            admin: admin.clone(),
+            fee_collector,
+            default_fee_bp,
+            min_bet_amount,
+            max_bet_amount,
+            dispute_window_sec,
+            paused: false,
+        };
+
         env.storage().persistent().set(&ADMIN, &admin);
         env.storage().persistent().set(&MARKET_WASM_HASH, &market_wasm_hash);
         env.storage().persistent().set(&TREASURY, &treasury);
         env.storage().persistent().set(&PAUSED, &false);
+        env.storage().persistent().set(&CONFIG_KEY, &config);
         env.storage().persistent().set(&MARKET_COUNT_KEY, &0u64);
         env.storage()
             .persistent()
@@ -64,12 +81,22 @@ impl MarketFactory {
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
-    ) {
+    ) -> Result<(), ContractError> {
         admin.require_auth();
 
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
+        let stored_admin: Address = env.storage().persistent()
+            .get(&ADMIN)
+            .ok_or(ContractError::Unauthorized)?;
+
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+
+        env.storage().persistent().set(&MARKET_WASM_HASH, &new_wasm_hash);
+        env.events().publish(("market_wasm_upgraded",), new_wasm_hash);
+
+        Ok(())
+    }
 
     /// Returns the stored Market contract wasm hash.
     pub fn get_market_wasm_hash(env: Env) -> BytesN<32> {
@@ -82,6 +109,14 @@ impl MarketFactory {
     /// Returns the stored treasury address.
     pub fn get_treasury(env: Env) -> Address {
         env.storage().persistent().get(&TREASURY).expect("not initialized")
+    }
+
+    /// Returns the stored protocol configuration.
+    pub fn get_config(env: Env) -> Result<ProtocolConfig, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&CONFIG_KEY)
+            .ok_or(ContractError::Unauthorized)
     }
 
     /// Deploys a new Market contract instance and registers its `MarketInfo`.
@@ -137,6 +172,29 @@ impl MarketFactory {
             .deployer()
             .with_address(env.current_contract_address(), salt)
             .deploy_v2(wasm_hash, ());
+
+        let config = Self::get_config(&env)?;
+        let treasury = Self::get_treasury(&env);
+
+        env.invoke_contract::<Result<(), ContractError>>(
+            &market_address,
+            &Symbol::new(&env, "initialize"),
+            soroban_sdk::vec![
+                &env,
+                env.current_contract_address().into(),
+                oracle.clone().into(),
+                treasury.clone().into(),
+                config.default_fee_bp.into(),
+                lock_time.into(),
+                end_time.into(),
+            ],
+        )?;
+
+        let _: () = env.invoke_contract(
+            &treasury,
+            &Symbol::new(&env, "register_market"),
+            soroban_sdk::vec![&env, market_address.clone().into()],
+        );
 
         let info = MarketInfo {
             market_id: market_id.clone(),
