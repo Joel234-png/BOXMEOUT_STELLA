@@ -874,35 +874,151 @@ Outcome::Draw → status = Cancelled → claim_refund() (full bet.amount, no fee
 
 ---
 
-## Storage Key Patterns
+## Storage Layout
 
-### MarketFactory
+Every contract stores all of its state in **`persistent` storage**. No contract
+uses `instance` or `temporary` storage today, and none calls `extend_ttl`, so
+every entry lives for the network's default persistent TTL from its last write
+(see [TTL strategy](#ttl-strategy) below).
 
-| Key | Type | Description |
-|---|---|---|
-| `CONFIG` | `ProtocolConfig` | Global protocol config |
-| `MARKET_COUNT` | `u64` | Total markets ever created |
-| `MARKET_{market_id}` | `Address` | Deployed Market contract address |
-| `ALL_MARKETS` | `Vec<Bytes>` | All market IDs in creation order |
-| `PENDING_ADMIN` | `Address` | Pending admin during two-step transfer |
+"Symbol" keys are `Symbol::new(env, "<NAME>")`; `DataKey::*` keys are the
+`#[contracttype] enum DataKey` in `contracts/market/src/lib.rs`.
 
-### Market
+### MarketFactory (`contracts/market_factory/src/lib.rs`)
 
-| Key | Type | Description |
-|---|---|---|
-| `MARKET_INFO` | `Market` | Full market state |
-| `BET_{bet_id}` | `Bet` | Individual bet by ID |
-| `BETS_BY_ADDR_{address}` | `Vec<Bytes>` | All bet IDs for an address |
-| `CLAIMED_{bet_id}` | `bool` | Whether a bet has been claimed |
-| `DISPUTE_RAISED` | `bool` | Whether a dispute is active |
-| `DISPUTE_REASON` | `Bytes` | Reason text for the active dispute |
+| Key | Value type | Storage class | Written by | TTL |
+|---|---|---|---|---|
+| `"ADMIN"` | `Address` | persistent | `initialize`, `set_admin` | network default, bumped on write |
+| `"MARKET_WASM_HASH"` | `BytesN<32>` | persistent | `initialize`, `upgrade_market_wasm` | network default, bumped on write |
+| `"TREASURY"` | `Address` | persistent | `initialize` | network default (never rewritten) |
+| `"PAUSED"` | `bool` | persistent | `initialize`, `pause_factory`, `unpause_factory` | network default, bumped on write |
+| `"MARKET_COUNT"` | `u64` | persistent | `initialize`, `create_market` | bumped on every `create_market` |
+| `"MARKET_MAP"` | `Map<Bytes, MarketInfo>` | persistent | `initialize`, `create_market` | bumped on every `create_market` |
+| `"ALL_MARKETS"` | `Vec<Bytes>` | persistent | `initialize`, `create_market` | bumped on every `create_market` |
 
-### Treasury
+> `MARKET_MAP` and `ALL_MARKETS` are single entries that grow with every market.
+> Their size (and so the read/write fee of `create_market` and the list
+> functions) grows linearly with the number of markets ever created.
 
-| Key | Type | Description |
-|---|---|---|
-| `ADMIN` | `Address` | Admin address |
-| `FACTORY` | `Address` | Authorized factory address |
-| `BALANCE` | `i128` | Current XLM balance in stroops |
-| `TOTAL_FEES_EARNED` | `i128` | Lifetime cumulative fees |
-| `WITHDRAWAL_LOG` | `Vec<(Address, i128, u64)>` | Past withdrawals |
+### Market (`contracts/market/src/lib.rs`, one instance per fight)
+
+| Key | Value type | Storage class | Written by | TTL |
+|---|---|---|---|---|
+| `DataKey::MarketInfo` | `Market` | persistent | `initialize`, `place_bet`, `lock_market`, `cancel_market`, `resolve_market`, `dispute_resolution`, `resolve_dispute`, `finalize_resolution` | bumped on every state change |
+| `DataKey::Factory` | `Address` | persistent | `initialize` | network default (never rewritten) |
+| `DataKey::Bet(bet_id)` | `Bet` | persistent | `place_bet` | network default (never rewritten) |
+| `DataKey::BetsByAddr(address)` | `Vec<Bytes>` | persistent | `place_bet` | bumped each time that address bets |
+| `DataKey::Claimed(bet_id)` | `bool` | persistent | `claim_winnings`, `claim_refund` | network default (never rewritten) |
+| `DataKey::DisputeRaised` | `bool` | persistent | `dispute_resolution` | network default (never rewritten) |
+| `DataKey::DisputeReason` | `Bytes` (≤ `MAX_DISPUTE_REASON_LEN` = 256 bytes) | persistent | `dispute_resolution` | network default (never rewritten) |
+| `"BET_COUNT"` | `u64` | persistent | `place_bet` | bumped on every bet |
+
+### Treasury (`contracts/treasury/src/lib.rs`)
+
+| Key | Value type | Storage class | Written by | TTL |
+|---|---|---|---|---|
+| `"ADMIN"` | `Address` | persistent | `initialize` | network default (never rewritten) |
+| `"FACTORY"` | `Address` | persistent | `initialize` | network default (never rewritten) |
+| `"TOKEN"` | `Address` | persistent | `initialize` | network default (never rewritten) |
+| `"FEE_BPS"` | `u32` | persistent | `initialize` | network default (never rewritten) |
+| `"FEE_RECIPIENT"` | `Address` | persistent | `initialize` | network default (never rewritten) |
+| `"BALANCE"` | `i128` | persistent | `initialize`, `deposit`, `deposit_fees`, `withdraw_fees`, `emergency_drain` | bumped on every deposit/withdrawal |
+| `"TOTAL_FEES"` | `i128` | persistent | `initialize`, `deposit_fees` | bumped on every fee deposit |
+| `"WITHDRAWAL_LOG"` | `Vec<(Address, i128, u64)>` | persistent | `withdraw_fees`, `emergency_drain` | bumped on every withdrawal |
+
+### TTL strategy
+
+- **Current behaviour:** no contract extends TTLs explicitly. Each write resets
+  an entry's TTL to the network minimum for persistent entries
+  (`minPersistentTTL` in the network config — check it with
+  `stellar network settings` / Stellar Lab, it differs between networks).
+- **What happens on expiry:** persistent entries are **archived, not deleted**.
+  Any transaction that touches an archived entry fails until the entry is
+  restored with a `RestoreFootprint` operation (the Stellar CLI and RPC
+  `simulateTransaction` report which entries need restoring). No funds or
+  state are lost, but the call fails until someone pays for the restore.
+- **Entries most at risk:** write-once keys that are only ever *read* later —
+  `DataKey::Factory`, `DataKey::Bet(id)`, Treasury `"ADMIN"`/`"FACTORY"`/`"TOKEN"`,
+  Factory `"TREASURY"`. A market whose fight is months away can have its
+  `Bet` entries archived before `claim_winnings` is called.
+- **Contract instance and wasm code** also carry TTLs. They are extended by the
+  deploy tooling, not by the contracts; operators should extend them for the
+  Factory, the Treasury and every live Market.
+- **Operator guidance until contracts bump TTLs themselves:** before a market's
+  claim period, extend its instance, `MarketInfo`, and all `Bet` entries (e.g.
+  `stellar contract extend --durability persistent --ledgers-to-extend <N> --key ...`),
+  and keep the Factory/Treasury config keys extended.
+
+---
+
+## Upgrade Policy
+
+### `upgrade_market_wasm` only affects **new** markets
+
+`MarketFactory::upgrade_market_wasm(admin, new_wasm_hash)` (admin-only)
+overwrites `"MARKET_WASM_HASH"`. That hash is read only by `create_market`
+when it calls `deployer().deploy_v2(wasm_hash, ...)`.
+
+- **Markets created after the call** are deployed from the new wasm.
+- **Markets created before the call keep running the wasm they were deployed
+  with.** Each Market is an independent contract instance whose code hash is
+  fixed at deployment; the factory holds no reference that would redirect it.
+- Existing market storage (bets, pools, claims, disputes) is untouched. There
+  is no migration step, and there is no way to "patch" a live market through
+  the factory.
+- The new wasm must be uploaded (`stellar contract upload`) before the hash is
+  set, otherwise every subsequent `create_market` fails.
+
+Consequences for operators and the backend:
+
+| Scenario | Effect |
+|---|---|
+| Bug fix in Market logic | Only fixes markets created after the upgrade. Open markets on the old wasm keep the bug; cancel/refund them if the bug is critical. |
+| `Market` struct or `DataKey` layout change | Safe for new markets. The indexer must handle both layouts while old markets are live. |
+| New or renamed event topics | Old markets keep emitting old topics. The indexer must accept both until every old market is finalized. |
+| Rollback | Call `upgrade_market_wasm` again with the previous hash; again only affects markets created afterwards. |
+
+### Factory and Treasury
+
+The Factory and Treasury do not expose a self-upgrade (`update_current_contract_wasm`)
+entry point today. Replacing either one means deploying a new contract and
+re-pointing configuration (a new Factory needs a Treasury whose `"FACTORY"`
+matches it, and vice versa). Markets record their factory in `DataKey::Factory`
+at `initialize` time, so existing markets keep calling the **old** factory's
+`get_config`.
+
+---
+
+## Event Topics
+
+Canonical topics are the snake_case names emitted by the helpers in
+`contracts/shared/src/events.rs`. C-60 (#1198, Treasury) and C-61 (#1199,
+Market) move every contract onto those helpers. Until both land, some functions
+still emit the legacy topic in the last column. Indexers should subscribe to
+the canonical topic and also accept the legacy one while markets deployed from
+older wasm are live (see [Upgrade Policy](#upgrade-policy)).
+
+| Contract | Function | Canonical topic (`shared::events`) | Topic tuple | Currently emitted | Tracking |
+|---|---|---|---|---|---|
+| MarketFactory | `create_market` | `market_created` | `(Symbol, market_id)` | `("market_created",)` with `MarketInfo` data | — |
+| MarketFactory | admin transfer | `admin_transferred` | `(Symbol,)` | not emitted | — |
+| MarketFactory | pause / unpause | `protocol_paused` / `protocol_unpaused` | `(Symbol,)` | not emitted | — |
+| MarketFactory | config update | `config_updated` | `(Symbol,)` | not emitted | — |
+| Market | `initialize` | `market_created` | `(Symbol, market_id)` | `market_created` (`Bytes` id, `Market` data) | C-61 |
+| Market | `place_bet` | `bet_placed` | `(Symbol, market_id)` | `bet_placed` (no id topic, local `BetPlacedEvent`) | C-61 |
+| Market | `lock_market` | `market_locked` | `(Symbol, market_id)` | `MarketLocked` | C-61 |
+| Market | `resolve_market` | `market_resolved` | `(Symbol, market_id)` | `market_resolved` ✅ | — |
+| Market | `claim_winnings` | `winnings_claimed` | `(Symbol, market_id)` | `winnings_claimed` ✅ | — |
+| Market | `claim_refund` | `refund_claimed` | `(Symbol, market_id)` | `RefundClaimed` | C-61 |
+| Market | `cancel_market` | `market_cancelled` | `(Symbol, market_id)` | `MarketCancelled` | C-61 |
+| Market | `dispute_resolution` | `resolution_disputed` | `(Symbol, market_id)` | `resolution_disputed` (no id topic) | C-61 |
+| Market | `resolve_dispute` | `dispute_resolved` | `(Symbol, market_id)` | `DisputeResolved` | C-61 |
+| Market | `finalize_resolution` | — (no helper yet) | — | `ResolutionFinalized` | C-61 |
+| Treasury | `deposit` | — (no helper yet) | — | `BetDeposited` | C-60 |
+| Treasury | `deposit_fees` | `fee_deposited` | `(Symbol,)` | `FeesDeposited` | C-60 |
+| Treasury | `withdraw_fees` | `fee_withdrawn` | `(Symbol,)` | `FeesWithdrawn` | C-60 |
+| Treasury | `emergency_drain` | `emergency_drain` | `(Symbol,)` | `EmrgDrain` | C-60 |
+| any | wasm upgrade | `contract_upgraded` | `(Symbol,)` | not emitted | — |
+
+`market_id` in canonical topic tuples is the first 8 bytes of the 32-byte
+market id, read as little-endian `u64`.
