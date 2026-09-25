@@ -224,6 +224,61 @@ impl Treasury {
         );
     }
 
+    /// Reclassifies a market's pro-rata rounding residue as protocol fees (C-69).
+    ///
+    /// The dust is already held in escrow, so `BALANCE` is unchanged; only the
+    /// fee balance (`TOTAL_FEES`) is credited. Emits a `DustSwept` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `from_market` - Address of the Market contract sweeping dust. Must authorize this call.
+    /// * `market_id` - Identifier of the market the dust belongs to.
+    /// * `amount` - Residual amount in stroops. Must be positive.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `from_market` has not authorized the call.
+    /// - `from_market` does not match the address registered for `market_id` in the factory.
+    /// - `amount` is not positive.
+    pub fn sweep_dust(env: Env, from_market: Address, market_id: Bytes, amount: i128) {
+        from_market.require_auth();
+
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+
+        let factory: Address = env
+            .storage()
+            .persistent()
+            .get(&key_factory(&env))
+            .expect("not initialized");
+
+        let registered: Address = env.invoke_contract(
+            &factory,
+            &Symbol::new(&env, "get_market_address"),
+            soroban_sdk::vec![&env, market_id.to_val()],
+        );
+        if registered != from_market {
+            panic!("unauthorized: caller is not a registered market");
+        }
+
+        let total: i128 = env
+            .storage()
+            .persistent()
+            .get(&key_total_fees(&env))
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key_total_fees(&env), &(total + amount));
+
+        env.events().publish(
+            (Symbol::new(&env, "DustSwept"),),
+            (from_market, market_id, amount, env.ledger().timestamp()),
+        );
+    }
+
     /// Transfers collected fees from the treasury to a recipient address.
     ///
     /// Validates that `amount ≤ BALANCE` and deducts it before transferring XLM.
