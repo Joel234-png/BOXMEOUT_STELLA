@@ -359,6 +359,11 @@ impl MarketContract {
     pub fn resolve_market(env: Env, oracle: Address, outcome: Outcome) {
         oracle.require_auth();
 
+        // `Undetermined` is the shared "not yet resolved" sentinel, not a result.
+        if outcome == Outcome::Undetermined {
+            panic!("invalid outcome");
+        }
+
         let mut market: Market = env.storage().persistent()
             .get(&DataKey::MarketInfo)
             .expect("market not initialized");
@@ -670,6 +675,9 @@ impl MarketContract {
     /// - `admin` has not authorized the call or is not the configured admin.
     /// - The market status is not `Disputed`.
     pub fn resolve_dispute(env: Env, admin: Address, override_outcome: Outcome) {
+        if override_outcome == Outcome::Undetermined {
+            panic!("invalid outcome");
+        }
         admin.require_auth();
 
         let factory: Address = env
