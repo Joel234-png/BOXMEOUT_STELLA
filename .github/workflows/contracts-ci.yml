@@ -1,6 +1,11 @@
 name: Contracts CI
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - ".github/workflows/contracts-ci.yml"
   pull_request:
     paths:
       - "contracts/**"
@@ -10,9 +15,15 @@ defaults:
   run:
     working-directory: contracts
 
+env:
+  # Maximum allowed size (bytes) for each optimised contract .wasm.
+  # Soroban's network limit for contract code is 64 KiB (65,536 bytes);
+  # anything above this cannot be deployed, so CI fails early.
+  MAX_WASM_SIZE_BYTES: 65536
+
 jobs:
   ci:
-    name: cargo test / clippy / fmt
+    name: cargo test / clippy / fmt / wasm size
     runs-on: ubuntu-latest
 
     steps:
@@ -22,7 +33,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, wasm32v1-none
           components: clippy, rustfmt
 
       - name: Cache Cargo registry
@@ -31,9 +42,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
+            contracts/target
           key: cargo-${{ runner.os }}-${{ hashFiles('contracts/**/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -41,8 +55,76 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Build
-        run: cargo build --release --target wasm32-unknown-unknown
+      - name: Build (optimised release profile)
+        run: stellar contract build
+
+      - name: Check wasm sizes
+        run: |
+          status=0
+          shopt -s nullglob
+          files=(target/wasm32v1-none/release/*.wasm)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No .wasm files found in target/wasm32v1-none/release"
+            exit 1
+          fi
+          echo "| Contract | Size (bytes) | Limit (bytes) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for f in "${files[@]}"; do
+            size=$(stat -c%s "$f")
+            name=$(basename "$f")
+            echo "$name: $size bytes (limit $MAX_WASM_SIZE_BYTES)"
+            echo "| $name | $size | $MAX_WASM_SIZE_BYTES |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$size" -gt "$MAX_WASM_SIZE_BYTES" ]; then
+              echo "::error file=contracts/$f::$name is $size bytes, exceeds limit of $MAX_WASM_SIZE_BYTES"
+              status=1
+            fi
+          done
+          exit $status
 
       - name: Test
         run: cargo test
+
+  coverage:
+    name: coverage (cargo llvm-cov)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: cargo-cov-${{ runner.os }}-${{ hashFiles('contracts/**/Cargo.lock') }}
+          restore-keys: cargo-cov-${{ runner.os }}-
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Coverage summary
+        run: |
+          {
+            echo "## Contracts coverage"
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-lcov
+          path: contracts/lcov.info
+          if-no-files-found: error
