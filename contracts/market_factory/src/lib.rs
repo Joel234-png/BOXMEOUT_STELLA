@@ -5,7 +5,7 @@
 //! ============================================================
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Map, String, Vec};
 
-use shared::{errors::ContractError, types::MarketInfo};
+use shared::{errors::ContractError, events, types::MarketInfo};
 
 // Storage keys for persistent state
 const ADMIN: &str = "ADMIN";
@@ -15,6 +15,8 @@ const PAUSED: &str = "PAUSED";
 const MARKET_COUNT_KEY: &str = "MARKET_COUNT";
 const MARKET_MAP: &str = "MARKET_MAP";
 const ALL_MARKETS_KEY: &str = "ALL_MARKETS";
+const PENDING_ADMIN: &str = "PENDING_ADMIN";
+const ORACLE_WHITELIST: &str = "ORACLE_WL";
 
 /// Maximum number of markets that may be returned in a single `list_markets` /
 /// `list_active_markets` page, regardless of the caller-requested `limit`.
@@ -60,16 +62,34 @@ impl MarketFactory {
     /// Only the protocol admin can call this. Only affects markets deployed
     /// after this call — already-deployed Market instances keep running the
     /// wasm code they were originally deployed with.
+    ///
+    /// Emits `contract_upgraded` with the new wasm hash.
+    ///
+    /// # Errors
+    /// Returns `ContractError::Unauthorized` if `admin` does not match the
+    /// stored admin.
     pub fn upgrade_market_wasm(
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
-    ) {
-        admin.require_auth();
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .persistent()
+            .set(&MARKET_WASM_HASH, &new_wasm_hash);
+        events::emit_contract_upgraded(&env, new_wasm_hash);
+        Ok(())
+    }
 
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
+    /// Returns the current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().persistent().get(&ADMIN).expect("not initialized")
+    }
+
+    /// Returns the admin address awaiting acceptance, if any.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&PENDING_ADMIN)
+    }
 
     /// Returns the stored Market contract wasm hash.
     pub fn get_market_wasm_hash(env: Env) -> BytesN<32> {
@@ -90,6 +110,8 @@ impl MarketFactory {
     /// - `ContractError::FactoryPaused` if the factory is paused
     /// - `ContractError::InvalidTimestamp` if `end_time` is in the past, or
     ///   `lock_time` is after `end_time`
+    /// - `ContractError::OracleNotWhitelisted` if `oracle` has not been added
+    ///   to the admin-managed oracle whitelist
     pub fn create_market(
         env: Env,
         caller: Address,
@@ -109,6 +131,12 @@ impl MarketFactory {
         let now = env.ledger().timestamp();
         if end_time <= now || lock_time > end_time {
             return Err(ContractError::InvalidTimestamp);
+        }
+
+        // Prevent creators from naming themselves (or any arbitrary address)
+        // as the resolving oracle.
+        if !Self::is_oracle_whitelisted(env.clone(), oracle.clone()) {
+            return Err(ContractError::OracleNotWhitelisted);
         }
 
         let count: u64 = env.storage().persistent().get(&MARKET_COUNT_KEY).unwrap_or(0);
@@ -242,21 +270,89 @@ impl MarketFactory {
         result
     }
 
-    /// Transfers admin rights to `new_admin`.
+    /// Step 1 of a two-step admin transfer: records `new_admin` as the
+    /// pending admin. Admin rights do not move until `new_admin` calls
+    /// `accept_admin`, so a mistyped address cannot brick admin functions.
+    /// Calling again overwrites any previous pending proposal.
     ///
     /// # Errors
     /// Returns `ContractError::Unauthorized` if `current_admin` does not match
     /// the stored admin.
-    pub fn set_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
-        current_admin.require_auth();
+    pub fn propose_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &current_admin)?;
+        env.storage().persistent().set(&PENDING_ADMIN, &new_admin);
+        Ok(())
+    }
 
-        let admin: Address = env.storage().persistent().get(&ADMIN).expect("not initialized");
-        if admin != current_admin {
+    /// Step 2 of a two-step admin transfer: the pending admin accepts and
+    /// becomes the admin. Emits `admin_transferred`.
+    ///
+    /// # Errors
+    /// Returns `ContractError::Unauthorized` if there is no pending admin or
+    /// `new_admin` is not the pending admin.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN)
+            .ok_or(ContractError::Unauthorized)?;
+        if pending != new_admin {
             return Err(ContractError::Unauthorized);
         }
 
+        let old_admin: Address = env.storage().persistent().get(&ADMIN).expect("not initialized");
         env.storage().persistent().set(&ADMIN, &new_admin);
+        env.storage().persistent().remove(&PENDING_ADMIN);
+
+        events::emit_admin_transferred(&env, old_admin, new_admin);
         Ok(())
+    }
+
+    /// Adds `oracle` to the whitelist of addresses allowed to be named as a
+    /// market's oracle in `create_market`. Emits `oracle_added`.
+    ///
+    /// # Errors
+    /// - `ContractError::Unauthorized` if `admin` does not match the stored admin
+    /// - `ContractError::OracleAlreadyWhitelisted` if `oracle` is already listed
+    pub fn add_oracle(env: Env, admin: Address, oracle: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+
+        let mut whitelist = Self::oracle_whitelist(&env);
+        if whitelist.contains_key(oracle.clone()) {
+            return Err(ContractError::OracleAlreadyWhitelisted);
+        }
+        whitelist.set(oracle.clone(), true);
+        env.storage().persistent().set(&ORACLE_WHITELIST, &whitelist);
+
+        events::emit_oracle_added(&env, oracle);
+        Ok(())
+    }
+
+    /// Removes `oracle` from the whitelist. Markets already created with this
+    /// oracle are unaffected. Emits `oracle_removed`.
+    ///
+    /// # Errors
+    /// - `ContractError::Unauthorized` if `admin` does not match the stored admin
+    /// - `ContractError::OracleNotWhitelisted` if `oracle` is not listed
+    pub fn remove_oracle(env: Env, admin: Address, oracle: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+
+        let mut whitelist = Self::oracle_whitelist(&env);
+        if !whitelist.contains_key(oracle.clone()) {
+            return Err(ContractError::OracleNotWhitelisted);
+        }
+        whitelist.remove(oracle.clone());
+        env.storage().persistent().set(&ORACLE_WHITELIST, &whitelist);
+
+        events::emit_oracle_removed(&env, oracle);
+        Ok(())
+    }
+
+    /// Returns whether `oracle` is on the oracle whitelist.
+    pub fn is_oracle_whitelisted(env: Env, oracle: Address) -> bool {
+        Self::oracle_whitelist(&env).contains_key(oracle)
     }
 
     /// Returns whether the factory is currently paused.
@@ -265,7 +361,7 @@ impl MarketFactory {
     }
 
     /// Pauses the factory. While paused, `create_market` reverts; existing
-    /// markets are unaffected.
+    /// markets are unaffected. Emits `protocol_paused`.
     ///
     /// # Errors
     /// Returns `ContractError::Unauthorized` if `admin` does not match the
@@ -273,10 +369,12 @@ impl MarketFactory {
     pub fn pause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&PAUSED, &true);
+        events::emit_protocol_paused(&env);
         Ok(())
     }
 
-    /// Unpauses the factory, re-enabling `create_market`.
+    /// Unpauses the factory, re-enabling `create_market`. Emits
+    /// `protocol_unpaused`.
     ///
     /// # Errors
     /// Returns `ContractError::Unauthorized` if `admin` does not match the
@@ -284,7 +382,15 @@ impl MarketFactory {
     pub fn unpause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&PAUSED, &false);
+        events::emit_protocol_unpaused(&env);
         Ok(())
+    }
+
+    fn oracle_whitelist(env: &Env) -> Map<Address, bool> {
+        env.storage()
+            .persistent()
+            .get(&ORACLE_WHITELIST)
+            .unwrap_or_else(|| Map::new(env))
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), ContractError> {
@@ -324,9 +430,15 @@ mod tests {
         client.initialize(admin, &wasm_hash, treasury);
     }
 
+    fn whitelisted_oracle(env: &Env, client: &MarketFactoryClient<'static>) -> Address {
+        let oracle = Address::generate(env);
+        client.add_oracle(&client.get_admin(), &oracle);
+        oracle
+    }
+
     fn create_default_market(env: &Env, client: &MarketFactoryClient<'static>) -> Bytes {
         let caller = Address::generate(env);
-        let oracle = Address::generate(env);
+        let oracle = whitelisted_oracle(env, client);
         let now = env.ledger().timestamp();
         client.create_market(
             &caller,
@@ -493,7 +605,7 @@ mod tests {
 
         // A market ending soon...
         let caller = Address::generate(&env);
-        let oracle = Address::generate(&env);
+        let oracle = whitelisted_oracle(&env, &client);
         let now = env.ledger().timestamp();
         let soon_ending = client.create_market(
             &caller,
@@ -525,30 +637,97 @@ mod tests {
         assert_ne!(active_after.get(0).unwrap().market_id, soon_ending);
     }
 
-    // ── C-07: set_admin ──────────────────────────────────────────────────────
+    // ── C-07 / C-58: propose_admin / accept_admin ────────────────────────────
 
     #[test]
-    fn set_admin_transfers_admin_rights() {
+    fn propose_and_accept_admin_transfers_admin_rights() {
         let (env, client, admin, treasury) = setup();
         init(&env, &client, &admin, &treasury);
 
         let new_admin = Address::generate(&env);
-        client.set_admin(&admin, &new_admin);
+        client.propose_admin(&admin, &new_admin);
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
 
+        client.accept_admin(&new_admin);
         assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_pending_admin(), None);
+
+        // The old admin loses rights after acceptance.
+        let result = client.try_pause_factory(&admin);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
     }
 
     #[test]
-    fn set_admin_rejects_non_admin_caller() {
+    fn accept_admin_by_wrong_address_fails() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+
+        let result = client.try_accept_admin(&impostor);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn propose_admin_rejects_non_admin_caller() {
         let (env, client, admin, treasury) = setup();
         init(&env, &client, &admin, &treasury);
 
         let impostor = Address::generate(&env);
         let new_admin = Address::generate(&env);
 
-        let result = client.try_set_admin(&impostor, &new_admin);
+        let result = client.try_propose_admin(&impostor, &new_admin);
         assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
-        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    // ── C-57: oracle whitelist ───────────────────────────────────────────────
+
+    #[test]
+    fn create_market_rejects_non_whitelisted_oracle() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let caller = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        // The creator naming themselves as oracle must be rejected.
+        let result = client.try_create_market(
+            &caller,
+            &String::from_str(&env, "Fighter A"),
+            &String::from_str(&env, "Fighter B"),
+            &caller,
+            &(now + 100),
+            &(now + 200),
+        );
+        assert_eq!(result, Err(Ok(ContractError::OracleNotWhitelisted)));
+    }
+
+    #[test]
+    fn remove_oracle_blocks_new_markets() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let oracle = whitelisted_oracle(&env, &client);
+        assert!(client.is_oracle_whitelisted(&oracle));
+        client.remove_oracle(&admin, &oracle);
+        assert!(!client.is_oracle_whitelisted(&oracle));
+
+        let caller = Address::generate(&env);
+        let now = env.ledger().timestamp();
+        let result = client.try_create_market(
+            &caller,
+            &String::from_str(&env, "Fighter A"),
+            &String::from_str(&env, "Fighter B"),
+            &oracle,
+            &(now + 100),
+            &(now + 200),
+        );
+        assert_eq!(result, Err(Ok(ContractError::OracleNotWhitelisted)));
     }
 
     // ── C-08: pause_factory / unpause_factory ───────────────────────────────
