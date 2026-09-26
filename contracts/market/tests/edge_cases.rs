@@ -11,13 +11,15 @@
 //!   - Empty market query edge cases
 //!   - Double claim detection
 //!   - Total pool invariant across many bets
+//!   - Dispute window boundaries (dispute_resolution / finalize_resolution)
+//!   - Dispute reason length boundary
 //!
 //! ≥10 distinct test cases, all must pass without panic/overflow.
 
 use market::types::{
     BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig,
 };
-use market::{DataKey, MarketContract, MarketContractClient};
+use market::{DataKey, MarketContract, MarketContractClient, MAX_DISPUTE_REASON_LEN};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -55,6 +57,18 @@ impl MockFactory {
     }
 }
 
+/// Accepts escrow deposits without moving tokens.
+#[contract]
+struct MockTreasury;
+
+#[contractimpl]
+impl MockTreasury {
+    pub fn deposit(_env: Env, _from_market: Address, _market_id: Bytes, _bettor: Address, _amount: i128) {}
+}
+
+/// Dispute window passed to `initialize` in every test market.
+const DISPUTE_WINDOW_SEC: u64 = 86_400;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn make_fighter(env: &Env, name: &str) -> Fighter {
@@ -71,6 +85,8 @@ fn setup_market(env: &Env) -> (MarketContractClient, Address, Address, u64) {
     let factory_id = env.register(MockFactory, (admin.clone(),));
     let oracle = Address::generate(env);
     let fee_collector = Address::generate(env);
+    let treasury_id = env.register(MockTreasury, ());
+    let bet_token = Address::generate(env);
 
     let now = env.ledger().timestamp();
     let scheduled_at = now + 2_000_000;
@@ -89,6 +105,9 @@ fn setup_market(env: &Env) -> (MarketContractClient, Address, Address, u64) {
         &factory_id,
         &200u32,
         &fee_collector,
+        &DISPUTE_WINDOW_SEC,
+        &treasury_id,
+        &bet_token,
     );
 
     (client, oracle, admin, betting_ends_at)
@@ -184,6 +203,8 @@ fn edge_max_i128_pool_totals() {
     let factory_id = env.register(MockFactory, (admin.clone(),));
     let oracle = Address::generate(&env);
     let fee_collector = Address::generate(&env);
+    let treasury_id = env.register(MockTreasury, ());
+    let bet_token = Address::generate(&env);
 
     let now = env.ledger().timestamp();
     let scheduled_at = now + 2_000_000;
@@ -202,6 +223,9 @@ fn edge_max_i128_pool_totals() {
         &factory_id,
         &200u32,
         &fee_collector,
+        &DISPUTE_WINDOW_SEC,
+        &treasury_id,
+        &bet_token,
     );
 
     let max_bet = 1_000_000_000_000_000_000i128; // 10^18
@@ -382,6 +406,8 @@ fn edge_zero_fee_full_payout() {
     let factory_id = env.register(MockFactory, (admin.clone(),));
     let oracle = Address::generate(&env);
     let fee_collector = Address::generate(&env);
+    let treasury_id = env.register(MockTreasury, ());
+    let bet_token = Address::generate(&env);
 
     let now = env.ledger().timestamp();
     let scheduled_at = now + 2_000_000;
@@ -400,6 +426,9 @@ fn edge_zero_fee_full_payout() {
         &factory_id,
         &0u32,
         &fee_collector,
+        &DISPUTE_WINDOW_SEC,
+        &treasury_id,
+        &bet_token,
     );
 
     let b1 = Address::generate(&env);
@@ -415,4 +444,156 @@ fn edge_zero_fee_full_payout() {
     // With 0 fee, winner gets 100% of total pool
     let payout = client.claim_winnings(&b1, &bet1);
     assert_eq!(payout, 1000);
+}
+
+// ─── Dispute window boundaries ────────────────────────────────────────────────
+//
+// The dispute window is half-open: [resolved_at, resolved_at + window).
+// dispute_resolution is allowed strictly before resolved_at + window;
+// finalize_resolution is allowed from resolved_at + window onwards.
+
+/// Places one bet for `bettor`, locks and resolves the market.
+/// Returns `resolved_at`.
+fn resolve_with_bettor(env: &Env, client: &MarketContractClient, oracle: &Address, bettor: &Address) -> u64 {
+    let betting_ends_at = client.get_market_info().betting_ends_at;
+    client.place_bet(bettor, &BetSide::FighterA, &1_000i128);
+
+    env.ledger().with_mut(|l| l.timestamp = betting_ends_at);
+    client.lock_market(oracle);
+
+    let resolved_at = betting_ends_at + 10;
+    env.ledger().with_mut(|l| l.timestamp = resolved_at);
+    client.resolve_market(oracle, &Outcome::FighterA);
+
+    assert_eq!(client.get_market_info().resolved_at, resolved_at);
+    resolved_at
+}
+
+fn reason_of_len(env: &Env, len: u32) -> Bytes {
+    let mut reason = Bytes::new(env);
+    for _ in 0..len {
+        reason.push_back(b'x');
+    }
+    reason
+}
+
+#[test]
+fn edge_dispute_one_second_before_window_end_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    let resolved_at = resolve_with_bettor(&env, &client, &oracle, &bettor);
+
+    env.ledger().with_mut(|l| l.timestamp = resolved_at + DISPUTE_WINDOW_SEC - 1);
+    client.dispute_resolution(&bettor, &reason_of_len(&env, 8));
+
+    assert_eq!(client.get_market_info().status, MarketStatus::Disputed);
+}
+
+#[test]
+#[should_panic(expected = "dispute window has closed")]
+fn edge_dispute_at_window_end_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    let resolved_at = resolve_with_bettor(&env, &client, &oracle, &bettor);
+
+    env.ledger().with_mut(|l| l.timestamp = resolved_at + DISPUTE_WINDOW_SEC);
+    client.dispute_resolution(&bettor, &reason_of_len(&env, 8));
+}
+
+#[test]
+#[should_panic(expected = "dispute window still open")]
+fn edge_finalize_one_second_before_window_end_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    let resolved_at = resolve_with_bettor(&env, &client, &oracle, &bettor);
+
+    env.ledger().with_mut(|l| l.timestamp = resolved_at + DISPUTE_WINDOW_SEC - 1);
+    client.finalize_resolution(&None);
+}
+
+#[test]
+fn edge_finalize_at_window_end_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    let resolved_at = resolve_with_bettor(&env, &client, &oracle, &bettor);
+
+    env.ledger().with_mut(|l| l.timestamp = resolved_at + DISPUTE_WINDOW_SEC);
+    client.finalize_resolution(&None);
+
+    assert_eq!(client.get_market_info().status, MarketStatus::Resolved);
+}
+
+#[test]
+fn edge_dispute_and_finalize_windows_do_not_overlap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    let resolved_at = resolve_with_bettor(&env, &client, &oracle, &bettor);
+    let reason = reason_of_len(&env, 8);
+
+    // One second before the boundary: dispute allowed, finalize rejected.
+    env.ledger().with_mut(|l| l.timestamp = resolved_at + DISPUTE_WINDOW_SEC - 1);
+    assert!(client.try_finalize_resolution(&None).is_err());
+
+    // At the boundary: dispute rejected, finalize allowed.
+    env.ledger().with_mut(|l| l.timestamp = resolved_at + DISPUTE_WINDOW_SEC);
+    assert!(client.try_dispute_resolution(&bettor, &reason).is_err());
+    assert!(client.try_finalize_resolution(&None).is_ok());
+}
+
+// ─── Dispute reason length boundary ───────────────────────────────────────────
+
+#[test]
+fn edge_dispute_reason_at_max_length_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    resolve_with_bettor(&env, &client, &oracle, &bettor);
+
+    client.dispute_resolution(&bettor, &reason_of_len(&env, MAX_DISPUTE_REASON_LEN));
+
+    assert_eq!(client.get_market_info().status, MarketStatus::Disputed);
+}
+
+#[test]
+#[should_panic(expected = "dispute reason exceeds maximum length")]
+fn edge_dispute_reason_over_max_length_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    resolve_with_bettor(&env, &client, &oracle, &bettor);
+
+    client.dispute_resolution(&bettor, &reason_of_len(&env, MAX_DISPUTE_REASON_LEN + 1));
+}
+
+#[test]
+fn edge_dispute_reason_over_max_length_leaves_market_resolved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, oracle, _admin, _betting_ends_at) = setup_market(&env);
+    let bettor = Address::generate(&env);
+    resolve_with_bettor(&env, &client, &oracle, &bettor);
+
+    let result = client.try_dispute_resolution(&bettor, &reason_of_len(&env, MAX_DISPUTE_REASON_LEN + 1));
+    assert!(result.is_err());
+    assert_eq!(client.get_market_info().status, MarketStatus::Resolved);
 }

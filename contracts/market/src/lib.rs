@@ -768,7 +768,7 @@ impl MarketContract {
     /// Dispute resolution - allows bettors to challenge submitted market resolutions.
     ///
     /// Transitions status to `Disputed`, freezing all claim processing until an admin
-    /// settles the dispute. Must be called within `dispute_window_sec` of `resolved_at`.
+    /// settles the dispute. Must be called strictly before `resolved_at + dispute_window_sec`.
     /// Only one active dispute is allowed per market. Emits a `resolution_disputed` event.
     ///
     /// # Arguments
@@ -776,7 +776,8 @@ impl MarketContract {
     /// * `env` - The Soroban execution environment.
     /// * `bettor` - Address of the bettor raising the dispute. Must authorize this call
     ///   and must have an existing bet in this market.
-    /// * `reason` - Free-form bytes describing the reason for the dispute.
+    /// * `reason` - Free-form bytes describing the reason for the dispute
+    ///   (at most [`MAX_DISPUTE_REASON_LEN`] bytes).
     ///
     /// # Panics
     ///
@@ -811,22 +812,24 @@ impl MarketContract {
             panic!("bettor has no bets in this market");
         }
 
-        // Check if within dispute window
+        // The dispute window is half-open: [resolved_at, resolved_at + dispute_window_sec).
+        // At exactly resolved_at + dispute_window_sec the window is closed and
+        // finalize_resolution becomes callable, so there is no second where both
+        // (or neither) are allowed.
         let current_time = env.ledger().timestamp();
         let dispute_deadline = market.resolved_at + market.dispute_window_sec;
-        if current_time > dispute_deadline {
+        if current_time >= dispute_deadline {
             panic!("dispute window has closed");
+        }
+
+        // Cap reason length to prevent storage abuse.
+        if reason.len() > MAX_DISPUTE_REASON_LEN {
+            panic!("dispute reason exceeds maximum length");
         }
 
         // Transition to Disputed status
         market.status = MarketStatus::Disputed;
         Self::write_market(&env, &market);
-
-        // Cap reason length to prevent storage abuse (max 256 bytes)
-        let max_reason_len = 256;
-        if reason.len() > max_reason_len {
-            panic!("dispute reason exceeds maximum length");
-        }
 
         // Store dispute reason
         env.storage().persistent().set(&DataKey::DisputeRaised, &true);
@@ -926,7 +929,9 @@ impl MarketContract {
             MarketStatus::Resolved => {
                 let current_time = env.ledger().timestamp();
                 let dispute_deadline = market.resolved_at + market.dispute_window_sec;
-                if current_time <= dispute_deadline {
+                // Mirrors dispute_resolution: the window closes at exactly
+                // resolved_at + dispute_window_sec.
+                if current_time < dispute_deadline {
                     panic!("dispute window still open");
                 }
                 market.status = MarketStatus::Resolved;
