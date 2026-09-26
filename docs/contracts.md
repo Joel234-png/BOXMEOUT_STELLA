@@ -536,15 +536,18 @@ paused             bool
 | Function | Auth required | Description |
 |---|---|---|
 | `initialize` | — | One-time setup. Stores ProtocolConfig. |
-| `create_market` | caller signs | Deploys a new Market contract for a fight. Returns `market_id`. |
+| `create_market` | caller signs | Deploys a new Market contract for a fight. `oracle` must be whitelisted (`OracleNotWhitelisted` otherwise). Returns `market_id`. |
 | `get_market_address` | — | Returns the contract address for a market_id. |
 | `get_all_markets` | — | Returns all market IDs (ordered by creation). |
 | `get_markets_paginated` | — | Returns a slice of market IDs. |
 | `update_config` | admin | Updates protocol fees, limits, and addresses. |
 | `pause_protocol` | admin | Blocks new markets and bets. |
 | `unpause_protocol` | admin | Restores normal operation. |
-| `transfer_admin` | admin | Initiates two-step admin transfer. |
-| `accept_admin` | new_admin | Completes two-step admin transfer. |
+| `propose_admin` | admin | Initiates two-step admin transfer (stores a pending admin). |
+| `accept_admin` | new_admin | Completes two-step admin transfer. Emits `admin_transferred`. |
+| `add_oracle` | admin | Adds an oracle to the whitelist. Emits `oracle_added`. |
+| `remove_oracle` | admin | Removes an oracle from the whitelist. Emits `oracle_removed`. |
+| `is_oracle_whitelisted` | — | Returns whether an oracle is whitelisted. |
 | `get_config` | — | Returns current ProtocolConfig. |
 
 ---
@@ -610,7 +613,7 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 **Condition:** New admin accepts the pending transfer via `accept_admin()`
 
 #### 3. `protocol_paused`
-**Emitted by:** `pause_protocol()`  
+**Emitted by:** `MarketFactory::pause_factory()`  
 **Topics:** `Symbol("protocol_paused")`  
 **Data fields:** (none)
 
@@ -618,7 +621,7 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 **Effect:** All markets become read-only; no new markets can be created
 
 #### 4. `protocol_unpaused`
-**Emitted by:** `unpause_protocol()`  
+**Emitted by:** `MarketFactory::unpause_factory()`  
 **Topics:** `Symbol("protocol_unpaused")`  
 **Data fields:** (none)
 
@@ -633,6 +636,22 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 - `new_value: i128` - New parameter value
 
 **Emitted when:** Protocol configuration is updated by admin
+
+#### 5a. `oracle_added`
+**Emitted by:** `MarketFactory::add_oracle()`  
+**Topics:** `Symbol("oracle_added")`  
+**Data fields:**
+- `oracle: Address` - Oracle added to the whitelist
+
+**Emitted when:** Admin whitelists an oracle. Only whitelisted oracles can be named in `create_market()`; any other address returns `OracleNotWhitelisted`.
+
+#### 5b. `oracle_removed`
+**Emitted by:** `MarketFactory::remove_oracle()`  
+**Topics:** `Symbol("oracle_removed")`  
+**Data fields:**
+- `oracle: Address` - Oracle removed from the whitelist
+
+**Emitted when:** Admin removes an oracle. Existing markets are unaffected; new markets can no longer name it.
 
 ---
 
@@ -746,6 +765,29 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 
 ### Treasury Events
 
+All Treasury events are emitted through the `shared::events` helpers so the
+backend indexer sees one consistent set of snake_case topic names. The legacy
+ad-hoc topics `BetDeposited`, `FeesDeposited`, `FeesWithdrawn` and `EmrgDrain`
+are no longer emitted.
+
+| Treasury function | Helper | Topic |
+|---|---|---|
+| `deposit()` | `emit_bet_deposited` | `bet_deposited` |
+| `deposit_fees()` | `emit_fee_deposited` | `fee_deposited` |
+| `withdraw_fees()` | `emit_fee_withdrawn` | `fee_withdrawn` |
+| `emergency_drain()` | `emit_emergency_drain` | `emergency_drain` |
+
+#### 14a. `bet_deposited`
+**Emitted by:** `deposit()`  
+**Topics:** `Symbol("bet_deposited")`  
+**Data fields:**
+- `market: Address` - Market contract escrowing the bet
+- `bettor: Address` - Bettor whose stake was escrowed
+- `market_id: Bytes` - Market identifier
+- `amount: i128` - Stake amount in stroops
+
+**Emitted when:** A market escrows a bettor's stake in the treasury
+
 #### 15. `fee_deposited`
 **Emitted by:** `deposit_fees()`  
 **Topics:** `Symbol("fee_deposited")`  
@@ -781,7 +823,7 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 **Security:** Emergency-only operation; signals protocol shutdown
 
 #### 18. `contract_upgraded`
-**Emitted by:** Contract upgrade function  
+**Emitted by:** `MarketFactory::upgrade_market_wasm()`  
 **Topics:** `Symbol("contract_upgraded")`  
 **Data fields:**
 - `new_wasm_hash: BytesN<32>` - SHA256 hash of new contract code

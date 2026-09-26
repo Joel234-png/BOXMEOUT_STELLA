@@ -1,5 +1,5 @@
 #![no_std]
-use shared::types::ProtocolConfig;
+use shared::{events, types::ProtocolConfig};
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, String, Symbol,
     Vec,
@@ -114,7 +114,7 @@ impl Treasury {
     ///
     /// Called by a `Market` contract when a bettor places a bet. Transfers
     /// `amount` of the configured bet token from `bettor` to this contract and
-    /// credits the treasury balance. Emits a `BetDeposited` event.
+    /// credits the treasury balance. Emits a `bet_deposited` event.
     ///
     /// # Arguments
     ///
@@ -167,16 +167,13 @@ impl Treasury {
             .persistent()
             .set(&key_balance(&env), &(balance + amount));
 
-        env.events().publish(
-            (Symbol::new(&env, "BetDeposited"),),
-            (from_market, bettor, market_id, amount, env.ledger().timestamp()),
-        );
+        events::emit_bet_deposited(&env, from_market, bettor, market_id, amount);
     }
 
     /// Receives protocol fees from a registered `Market` contract.
     ///
     /// Only callable by a Market contract address registered with the factory.
-    /// Increments the per-market escrow balance and emits a `BetDeposited` event.
+    /// Increments the treasury balance and emits a `fee_deposited` event.
     ///
     /// # Arguments
     ///
@@ -224,16 +221,18 @@ impl Treasury {
             .persistent()
             .set(&key_total_fees(&env), &(total + amount));
 
-        env.events().publish(
-            (Symbol::new(&env, "FeesDeposited"),),
-            (caller, amount, env.ledger().timestamp()),
-        );
+        let token_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_token(&env))
+            .expect("token not set");
+        events::emit_fee_deposited(&env, caller, token_addr, amount);
     }
 
     /// Transfers collected fees from the treasury to a recipient address.
     ///
     /// Validates that `amount ≤ BALANCE` and deducts it before transferring XLM.
-    /// Appends an entry to `WITHDRAWAL_LOG`. Emits a `FeesWithdrawn` event.
+    /// Appends an entry to `WITHDRAWAL_LOG`. Emits a `fee_withdrawn` event.
     ///
     /// # Arguments
     ///
@@ -291,10 +290,7 @@ impl Treasury {
         log.push_back((recipient.clone(), amount, ts));
         env.storage().persistent().set(&key_wlog(&env), &log);
 
-        env.events().publish(
-            (Symbol::new(&env, "FeesWithdrawn"),),
-            (recipient, amount, ts),
-        );
+        events::emit_fee_withdrawn(&env, token_addr, amount, recipient);
     }
 
     /// Release escrowed winnings or refunds from a market to a bettor (issue #1181).
@@ -322,7 +318,7 @@ impl Treasury {
     ///
     /// Only callable while the protocol is paused (verified via cross-contract call
     /// to the factory's `get_config`). Resets `BALANCE` to zero, logs the drain,
-    /// and emits an `EmergencyDrain` event.
+    /// and emits an `emergency_drain` event.
     ///
     /// # Arguments
     ///
@@ -394,10 +390,7 @@ impl Treasury {
         log.push_back((recipient.clone(), amount, ts));
         env.storage().persistent().set(&key_wlog(&env), &log);
 
-        env.events().publish(
-            (symbol_short!("EmrgDrain"),),
-            (recipient, amount, ts),
-        );
+        events::emit_emergency_drain(&env, token_addr, amount, admin);
 
         amount
     }

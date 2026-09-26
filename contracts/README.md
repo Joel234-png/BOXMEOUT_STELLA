@@ -69,16 +69,17 @@ Emitted when a new market contract is initialized.
   - `resolved_at: u64` - Timestamp when resolved (0 at creation)
   - `dispute_window_sec: u64` - Duration of dispute period
 
-### FeesDeposited
-Emitted when a market deposits accumulated protocol fees into treasury.
+### fee_deposited
+Emitted when a market deposits accumulated protocol fees into treasury
+(via `shared::events::emit_fee_deposited`).
 
 **Topics:**
-- `Symbol("FeesDeposited")` - Event name
+- `Symbol("fee_deposited")` - Event name
 
 **Data:**
 - `Address` - Market address depositing fees
+- `Address` - Token address
 - `i128` - Amount deposited (stroops)
-- `u64` - Timestamp of deposit
 
 ### FeeBpsUpdated
 Emitted when the treasury admin updates the protocol fee rate.
@@ -89,26 +90,29 @@ Emitted when the treasury admin updates the protocol fee rate.
 **Data:**
 - `u32` - New fee rate in basis points
 
-### FeesWithdrawn
-Emitted when fees are withdrawn from the treasury.
+### fee_withdrawn
+Emitted when fees are withdrawn from the treasury
+(via `shared::events::emit_fee_withdrawn`).
 
 **Topics:**
-- `Symbol("FeesWithdrawn")` - Event name
+- `Symbol("fee_withdrawn")` - Event name
 
 **Data:**
-- `Address` - Recipient of withdrawn fees
+- `Address` - Token withdrawn
 - `i128` - Amount withdrawn (stroops)
-- `u64` - Timestamp of withdrawal
+- `Address` - Recipient of withdrawn fees
 
-### EmergencyDrain
-Emitted when the treasury is drained during a protocol pause.
+### emergency_drain
+Emitted when the treasury is drained during a protocol pause
+(via `shared::events::emit_emergency_drain`).
 
 **Topics:**
-- `Symbol("EmergencyDrain")` - Event name
-- `Address` - Recipient address
+- `Symbol("emergency_drain")` - Event name
 
 **Data:**
+- `Address` - Token drained
 - `i128` - Total amount drained (stroops)
+- `Address` - Admin executing the drain
 
 ### BetPlaced
 Emitted when a bettor places a bet on a market.

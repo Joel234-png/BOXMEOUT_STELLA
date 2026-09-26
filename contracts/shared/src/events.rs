@@ -3,7 +3,7 @@
 //! All emitted events are defined here for consistency.
 //! ============================================================
 
-use soroban_sdk::{Address, Env, String, Symbol};
+use soroban_sdk::{Address, Bytes, Env, String, Symbol};
 
 use crate::types::{BetRecord, ClaimReceipt, Outcome};
 
@@ -115,6 +115,15 @@ pub fn emit_fee_deposited(env: &Env, market: Address, token: Address, amount: i1
     env.events().publish(topics, (market, token, amount));
 }
 
+/// Emits a `bet_deposited` event when a market escrows a bettor's stake in the treasury.
+///
+/// Topics: `(Symbol("bet_deposited"),)`
+/// Data:   `(market, bettor, market_id, amount)`
+pub fn emit_bet_deposited(env: &Env, market: Address, bettor: Address, market_id: Bytes, amount: i128) {
+    let topics = (Symbol::new(env, "bet_deposited"),);
+    env.events().publish(topics, (market, bettor, market_id, amount));
+}
+
 /// Emits a `fee_withdrawn` event when the admin withdraws accumulated fees.
 ///
 /// Topics: `(Symbol("fee_withdrawn"),)`
@@ -151,16 +160,46 @@ pub fn emit_conflicting_oracle_report(env: &Env, market_id: u64, oracle_address:
     env.events().publish(topics, oracle_address);
 }
 
+/// Emits an `oracle_added` event when an oracle is added to the factory whitelist.
+///
+/// Topics: `(Symbol("oracle_added"),)`
+/// Data:   `oracle`
+pub fn emit_oracle_added(env: &Env, oracle: Address) {
+    let topics = (Symbol::new(env, "oracle_added"),);
+    env.events().publish(topics, oracle);
+}
+
+/// Emits an `oracle_removed` event when an oracle is removed from the factory whitelist.
+///
+/// Topics: `(Symbol("oracle_removed"),)`
+/// Data:   `oracle`
+pub fn emit_oracle_removed(env: &Env, oracle: Address) {
+    let topics = (Symbol::new(env, "oracle_removed"),);
+    env.events().publish(topics, oracle);
+}
+
+/// Emits a `contract_upgraded` event when the Market wasm hash is changed.
+///
+/// Topics: `(Symbol("contract_upgraded"),)`
+/// Data:   `new_wasm_hash`
 pub fn emit_contract_upgraded(env: &Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
     let topics = (Symbol::new(env, "contract_upgraded"),);
     env.events().publish(topics, new_wasm_hash);
 }
 
+/// Emits a `protocol_paused` event.
+///
+/// Topics: `(Symbol("protocol_paused"),)`
+/// Data:   `()`
 pub fn emit_protocol_paused(env: &Env) {
     let topics = (Symbol::new(env, "protocol_paused"),);
     env.events().publish(topics, ());
 }
 
+/// Emits a `protocol_unpaused` event.
+///
+/// Topics: `(Symbol("protocol_unpaused"),)`
+/// Data:   `()`
 pub fn emit_protocol_unpaused(env: &Env) {
     let topics = (Symbol::new(env, "protocol_unpaused"),);
     env.events().publish(topics, ());
