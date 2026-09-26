@@ -6,6 +6,7 @@ import * as marketService from "./market.service";
 import * as betService from "./bet.service";
 import { markBetClaimed } from "./bet.service";
 import { publishMarketEvent } from "../events/marketEvents";
+import { indexerLedgerLag } from "../metrics";
 
 const prisma = new PrismaClient();
 const logger = pino({ name: "indexer" });
@@ -63,8 +64,18 @@ export async function startIndexer(): Promise<void> {
       // dynamically deployed Market contracts on restart.
       const eventsResponse = await server.getEvents({
         startLedger: fromLedger + 1,
+        filters: [],
         limit: 100,
       });
+
+      // B-61: update the ledger lag gauge after each RPC poll
+      // getLatestLedger() is inexpensive and returns the head ledger sequence
+      try {
+        const latestLedger = await server.getLatestLedger();
+        indexerLedgerLag.set(Math.max(0, latestLedger.sequence - fromLedger));
+      } catch {
+        // Non-fatal — metrics update is best-effort
+      }
 
       const byLedger = new Map<number, SorobanEvent[]>();
       for (const raw of eventsResponse.events) {
@@ -81,16 +92,10 @@ export async function startIndexer(): Promise<void> {
       }
 
       for (const [ledgerSeq, events] of [...byLedger.entries()].sort((a, b) => a[0] - b[0])) {
-        // Step 1: Persist raw events to EventLog BEFORE downstream processing
-        await persistRawEvents(events);
-
-        // Step 2: Process events (route to handlers)
+        // B-62: All writes (raw event persist, handler effects, cursor update)
+        // happen inside a single processLedger transaction.
         await processLedger({ sequence: ledgerSeq, closedAt: events[0].ledgerClosedAt, events });
 
-        // Step 3: Mark events as processed
-        await markEventsProcessed(events);
-
-        await saveLastIndexedLedger(ledgerSeq);
         fromLedger = ledgerSeq;
       }
 
@@ -106,55 +111,6 @@ export async function startIndexer(): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// EventLog persistence (idempotent ingestion)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Writes raw Soroban events to the EventLog table before any downstream processing.
- * Uses upsert semantics — duplicate (txHash, eventType) pairs are silently ignored,
- * guaranteeing idempotent ingestion across restarts.
- */
-async function persistRawEvents(events: SorobanEvent[]): Promise<void> {
-  for (const event of events) {
-    await prisma.eventLog.upsert({
-      where: {
-        txHash_eventType: {
-          txHash: event.txHash,
-          eventType: event.type,
-        },
-      },
-      update: {}, // no-op on conflict — preserve original record
-      create: {
-        txHash: event.txHash,
-        eventType: event.type,
-        contractId: event.contractId,
-        ledger: event.ledger,
-        ledgerClosedAt: new Date(event.ledgerClosedAt),
-        body: event.body,
-      },
-    });
-  }
-}
-
-/**
- * Marks a batch of events as processed by setting their processedAt timestamp.
- * Only updates events that are still null (unprocessed).
- */
-async function markEventsProcessed(events: SorobanEvent[]): Promise<void> {
-  const now = new Date();
-  for (const event of events) {
-    await prisma.eventLog.updateMany({
-      where: {
-        txHash: event.txHash,
-        eventType: event.type,
-        processedAt: null,
-      },
-      data: { processedAt: now },
-    });
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,27 +139,55 @@ export async function saveLastIndexedLedger(ledger: number): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// processLedger: route events + DB transaction
+// processLedger: single atomic DB transaction (B-62)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Processes all contract events in a single ledger.
- * Routes each event to the appropriate handler by event.type.
- * Wrapped in a Prisma interactive transaction — all handlers succeed or none persist.
+ * B-62: Processes all contract events in a single ledger inside ONE
+ * prisma.$transaction, so that:
+ *   - raw EventLog upserts
+ *   - all handler writes (market creates, bet records, status updates, etc.)
+ *   - processedAt timestamps on EventLog rows
+ *   - IndexerState cursor advance
+ * all commit atomically or all roll back.
  *
- * Idempotency guarantee: checks EventLog for previously processed events
- * (txHash + eventType) and skips them. Marks each event as processed on success.
- * This ensures never reprocessing already-processed events on restart (Task 4).
+ * A crash between any two of these steps leaves the DB in a consistent state:
+ * on restart the indexer re-polls the same ledger, the handler upserts are
+ * idempotent, and the cursor only advances on full success.
+ *
+ * Idempotency guarantee: each event is skipped if its EventLog row already has
+ * a non-null processedAt, so retries are safe.
  */
 export async function processLedger(ledger: LedgerData): Promise<void> {
-  await prisma.$transaction(async () => {
+  await prisma.$transaction(async (tx) => {
+    const now = new Date();
+
     for (const event of ledger.events) {
-      // ── Task 4 + Task 3: Idempotent event processing via EventLog ──────
-      // Skip events already successfully processed (safe on restart mid-stream)
-      const alreadyProcessed = await prisma.eventLog.findUnique({
-        where: { txHash_eventType: { txHash: event.txHash, eventType: event.type } },
+      // ── Upsert the raw EventLog row (idempotent) ────────────────────
+      await tx.eventLog.upsert({
+        where: {
+          txHash_eventType: {
+            txHash: event.txHash,
+            eventType: event.type,
+          },
+        },
+        update: {}, // no-op on conflict — preserve original record
+        create: {
+          txHash: event.txHash,
+          eventType: event.type,
+          contractId: event.contractId,
+          ledger: event.ledger,
+          ledgerClosedAt: new Date(event.ledgerClosedAt),
+          body: event.body as object,
+        },
       });
-      if (alreadyProcessed) {
+
+      // ── Skip if already processed (idempotent on restart) ──────────
+      const existing = await tx.eventLog.findUnique({
+        where: { txHash_eventType: { txHash: event.txHash, eventType: event.type } },
+        select: { processedAt: true },
+      });
+      if (existing?.processedAt) {
         logger.debug(
           { eventType: event.type, txHash: event.txHash },
           "Event already processed — skipping"
@@ -246,17 +230,23 @@ export async function processLedger(ledger: LedgerData): Promise<void> {
           break;
       }
 
-      // ── Task 3: Mark event as processed (processedAt timestamp) ─────
-      await prisma.eventLog.create({
-        data: {
-          eventType: event.type,
-          contractId: event.contractId,
-          ledger: event.ledger,
+      // ── Mark event as processed (still inside the transaction) ─────
+      await tx.eventLog.updateMany({
+        where: {
           txHash: event.txHash,
-          body: event.body as object,
+          eventType: event.type,
+          processedAt: null,
         },
+        data: { processedAt: now },
       });
     }
+
+    // ── Advance the cursor — only commits if all handlers succeeded ──
+    await tx.indexerState.upsert({
+      where: { id: 1 },
+      update: { lastLedger: ledger.sequence },
+      create: { id: 1, lastLedger: ledger.sequence },
+    });
   });
 }
 
@@ -307,7 +297,7 @@ export async function handleMarketCreatedEvent(event: SorobanEvent): Promise<voi
  * Parses BetPlaced event body, records the bet and updates pool totals.
  *
  * Pool totals are updated atomically with bet insertion — both operations
- * execute within the same $transaction wrapping processLedger (Task 2).
+ * execute within the same $transaction wrapping processLedger (B-62).
  *
  * Expected event.body shape:
  * {
@@ -374,7 +364,7 @@ export async function handleMarketResolvedEvent(event: SorobanEvent): Promise<vo
   const b = event.body;
   const marketId = b.market_id as string;
 
-  // ── Task 1: Out-of-order guard — reject gracefully if market not yet created ──
+  // Out-of-order guard — reject gracefully if market not yet created
   const market = await prisma.market.findUnique({ where: { id: marketId } });
   if (!market) {
     throw new Error(
@@ -396,7 +386,7 @@ export async function handleMarketResolvedEvent(event: SorobanEvent): Promise<vo
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// handleWinnersClaimedEvent
+// handleWinningsClaimedEvent / handleRefundClaimedEvent
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**

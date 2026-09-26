@@ -3,7 +3,7 @@
 //! Parse raw Soroban event payloads into typed event structs.
 //! ============================================================
 
-use soroban_sdk::{Address, Env, String, TryFromVal, Val, Vec};
+use soroban_sdk::{Address, Bytes, Env, String, TryFromVal, Val, Vec};
 
 use crate::types::{BetRecord, ClaimReceipt, Outcome};
 
@@ -19,13 +19,14 @@ pub struct MarketCreatedEvent {
 #[derive(Clone, Debug)]
 pub struct MarketLockedEvent {
     pub market_id: u64,
+    pub locked_at: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct MarketResolvedEvent {
     pub market_id: u64,
     pub outcome: Outcome,
-    pub oracle_address: Address,
+    pub resolved_at: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +45,7 @@ pub struct WinningsClaimedEvent {
 pub struct RefundClaimedEvent {
     pub market_id: u64,
     pub bettor: Address,
+    pub bet_id: Bytes,
     pub amount: i128,
 }
 
@@ -63,6 +65,19 @@ pub struct MarketDisputedEvent {
 pub struct DisputeResolvedEvent {
     pub market_id: u64,
     pub final_outcome: Outcome,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolutionDisputedEvent {
+    pub market_id: u64,
+    pub disputer: Address,
+    pub reason: Bytes,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolutionFinalizedEvent {
+    pub market_id: u64,
+    pub finalized_at: u64,
 }
 
 // ─── Error type ───────────────────────────────────────────────────────────────
@@ -105,28 +120,29 @@ pub fn parse_market_created_event(
 /// Parses a raw `market_locked` event.
 ///
 /// Topics: `(Symbol("market_locked"), market_id: u64)`
-/// Data:   `()`
+/// Data:   `locked_at: u64`
 pub fn parse_market_locked_event(
     env: &Env,
     topics: &Vec<Val>,
-    _data: &Val,
+    data: &Val,
 ) -> Result<MarketLockedEvent, ParseError> {
     let market_id: u64 = get_topic(env, topics, 1)?;
-    Ok(MarketLockedEvent { market_id })
+    let locked_at: u64 = decode_data(env, data)?;
+    Ok(MarketLockedEvent { market_id, locked_at })
 }
 
 /// Parses a raw `market_resolved` event.
 ///
 /// Topics: `(Symbol("market_resolved"), market_id: u64)`
-/// Data:   `(outcome: Outcome, oracle_address: Address)`
+/// Data:   `(outcome: Outcome, resolved_at: u64)`
 pub fn parse_market_resolved_event(
     env: &Env,
     topics: &Vec<Val>,
     data: &Val,
 ) -> Result<MarketResolvedEvent, ParseError> {
     let market_id: u64 = get_topic(env, topics, 1)?;
-    let (outcome, oracle_address): (Outcome, Address) = decode_data(env, data)?;
-    Ok(MarketResolvedEvent { market_id, outcome, oracle_address })
+    let (outcome, resolved_at): (Outcome, u64) = decode_data(env, data)?;
+    Ok(MarketResolvedEvent { market_id, outcome, resolved_at })
 }
 
 /// Parses a raw `bet_placed` event.
@@ -160,15 +176,15 @@ pub fn parse_winnings_claimed_event(
 /// Parses a raw `refund_claimed` event.
 ///
 /// Topics: `(Symbol("refund_claimed"), market_id: u64)`
-/// Data:   `(bettor: Address, amount: i128)`
+/// Data:   `(bettor: Address, bet_id: Bytes, amount: i128)`
 pub fn parse_refund_claimed_event(
     env: &Env,
     topics: &Vec<Val>,
     data: &Val,
 ) -> Result<RefundClaimedEvent, ParseError> {
     let market_id: u64 = get_topic(env, topics, 1)?;
-    let (bettor, amount): (Address, i128) = decode_data(env, data)?;
-    Ok(RefundClaimedEvent { market_id, bettor, amount })
+    let (bettor, bet_id, amount): (Address, Bytes, i128) = decode_data(env, data)?;
+    Ok(RefundClaimedEvent { market_id, bettor, bet_id, amount })
 }
 
 /// Parses a raw `market_cancelled` event.
@@ -213,14 +229,42 @@ pub fn parse_dispute_resolved_event(
     Ok(DisputeResolvedEvent { market_id, final_outcome })
 }
 
+/// Parses a raw `resolution_disputed` event.
+///
+/// Topics: `(Symbol("resolution_disputed"), market_id: u64)`
+/// Data:   `(disputer: Address, reason: Bytes)`
+pub fn parse_resolution_disputed_event(
+    env: &Env,
+    topics: &Vec<Val>,
+    data: &Val,
+) -> Result<ResolutionDisputedEvent, ParseError> {
+    let market_id: u64 = get_topic(env, topics, 1)?;
+    let (disputer, reason): (Address, Bytes) = decode_data(env, data)?;
+    Ok(ResolutionDisputedEvent { market_id, disputer, reason })
+}
+
+/// Parses a raw `resolution_finalized` event.
+///
+/// Topics: `(Symbol("resolution_finalized"), market_id: u64)`
+/// Data:   `finalized_at: u64`
+pub fn parse_resolution_finalized_event(
+    env: &Env,
+    topics: &Vec<Val>,
+    data: &Val,
+) -> Result<ResolutionFinalizedEvent, ParseError> {
+    let market_id: u64 = get_topic(env, topics, 1)?;
+    let finalized_at: u64 = decode_data(env, data)?;
+    Ok(ResolutionFinalizedEvent { market_id, finalized_at })
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{
         contract, contractimpl,
-        testutils::{Address as _, Events},
-        Address, Env, IntoVal,
+        testutils::Address as _,
+        Address, Env,
     };
 
     use crate::{
@@ -248,10 +292,11 @@ mod tests {
         soroban_sdk::String::from_str(env, v)
     }
 
+    /// Returns the most recent event as `((), topics, data)`.
     macro_rules! last_event {
         ($env:expr) => {{
-            let all = $env.events().all();
-            all.last().unwrap()
+            let (topics, data) = crate::test_utils::last_event(&$env);
+            ((), topics, data)
         }};
     }
 
@@ -272,24 +317,24 @@ mod tests {
     #[test]
     fn test_parse_market_locked_event() {
         let (env, id) = setup();
-        env.as_contract(&id, || { emit_market_locked(&env, 2); });
+        env.as_contract(&id, || { emit_market_locked(&env, 2, 900); });
         let ev = last_event!(env);
         let parsed = parse_market_locked_event(&env, &ev.1, &ev.2).unwrap();
         assert_eq!(parsed.market_id, 2);
+        assert_eq!(parsed.locked_at, 900);
     }
 
     #[test]
     fn test_parse_market_resolved_event() {
         let (env, id) = setup();
-        let oracle = addr(&env);
         env.as_contract(&id, || {
-            emit_market_resolved(&env, 3, Outcome::FighterA, oracle.clone());
+            emit_market_resolved(&env, 3, Outcome::FighterA, 1_234);
         });
         let ev = last_event!(env);
         let parsed = parse_market_resolved_event(&env, &ev.1, &ev.2).unwrap();
         assert_eq!(parsed.market_id, 3);
         assert_eq!(parsed.outcome, Outcome::FighterA);
-        assert_eq!(parsed.oracle_address, oracle);
+        assert_eq!(parsed.resolved_at, 1_234);
     }
 
     #[test]
@@ -297,6 +342,7 @@ mod tests {
         let (env, id) = setup();
         let bettor = addr(&env);
         let bet = BetRecord {
+            bet_id: soroban_sdk::Bytes::from_array(&env, &[4u8; 32]),
             bettor: bettor.clone(),
             market_id: 4,
             side: BetSide::FighterB,
@@ -317,29 +363,30 @@ mod tests {
         let (env, id) = setup();
         let bettor = addr(&env);
         let receipt = ClaimReceipt {
+            bet_id: soroban_sdk::Bytes::from_array(&env, &[5u8; 32]),
             bettor: bettor.clone(),
-            market_id: 5,
-            amount_won: 9_800_000,
-            fee_deducted: 200_000,
+            payout: 9_800_000,
             claimed_at: 2_000,
         };
         env.as_contract(&id, || { emit_winnings_claimed(&env, 5, receipt.clone()); });
         let ev = last_event!(env);
         let parsed = parse_winnings_claimed_event(&env, &ev.1, &ev.2).unwrap();
         assert_eq!(parsed.market_id, 5);
-        assert_eq!(parsed.receipt.amount_won, 9_800_000);
-        assert_eq!(parsed.receipt.fee_deducted, 200_000);
+        assert_eq!(parsed.receipt.bettor, bettor);
+        assert_eq!(parsed.receipt.payout, 9_800_000);
     }
 
     #[test]
     fn test_parse_refund_claimed_event() {
         let (env, id) = setup();
         let bettor = addr(&env);
-        env.as_contract(&id, || { emit_refund_claimed(&env, 6, bettor.clone(), 3_000_000); });
+        let bet_id = soroban_sdk::Bytes::from_array(&env, &[6u8; 32]);
+        env.as_contract(&id, || { emit_refund_claimed(&env, 6, bettor.clone(), bet_id.clone(), 3_000_000); });
         let ev = last_event!(env);
         let parsed = parse_refund_claimed_event(&env, &ev.1, &ev.2).unwrap();
         assert_eq!(parsed.market_id, 6);
         assert_eq!(parsed.bettor, bettor);
+        assert_eq!(parsed.bet_id, bet_id);
         assert_eq!(parsed.amount, 3_000_000);
     }
 
@@ -374,10 +421,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_resolution_disputed_event() {
+        let (env, id) = setup();
+        let disputer = addr(&env);
+        let reason = soroban_sdk::Bytes::from_slice(&env, b"wrong winner");
+        env.as_contract(&id, || {
+            emit_resolution_disputed(&env, 10, disputer.clone(), reason.clone());
+        });
+        let ev = last_event!(env);
+        let parsed = parse_resolution_disputed_event(&env, &ev.1, &ev.2).unwrap();
+        assert_eq!(parsed.market_id, 10);
+        assert_eq!(parsed.disputer, disputer);
+        assert_eq!(parsed.reason, reason);
+    }
+
+    #[test]
+    fn test_parse_resolution_finalized_event() {
+        let (env, id) = setup();
+        env.as_contract(&id, || { emit_resolution_finalized(&env, 11, 4_242); });
+        let ev = last_event!(env);
+        let parsed = parse_resolution_finalized_event(&env, &ev.1, &ev.2).unwrap();
+        assert_eq!(parsed.market_id, 11);
+        assert_eq!(parsed.finalized_at, 4_242);
+    }
+
+    #[test]
     fn test_parse_invalid_topics_returns_error() {
         let (env, _id) = setup();
         let empty: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(&env);
-        let dummy_data: soroban_sdk::Val = soroban_sdk::Val::from_void();
+        let dummy_data: soroban_sdk::Val = soroban_sdk::Val::from_void().into();
         let result = parse_market_locked_event(&env, &empty, &dummy_data);
         assert_eq!(result.unwrap_err(), ParseError::InvalidLength);
     }

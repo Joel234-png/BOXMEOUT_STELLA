@@ -19,7 +19,30 @@ const mockCreate = jest.fn();
 const mockUpdateMany = jest.fn();
 const mockEventLogFindUnique = jest.fn();
 const mockEventLogCreate = jest.fn();
+const mockEventLogUpsert = jest.fn();
+const mockEventLogUpdateMany = jest.fn();
+const mockIndexerStateUpsert = jest.fn();
 const mockMarketFindUnique = jest.fn();
+
+// The tx proxy passed to the $transaction callback mirrors the prisma instance
+// so the new interactive-transaction calls resolve correctly.
+const txMock = {
+  eventLog: {
+    upsert: mockEventLogUpsert,
+    findUnique: mockEventLogFindUnique,
+    updateMany: mockEventLogUpdateMany,
+  },
+  indexerState: {
+    upsert: mockIndexerStateUpsert,
+  },
+  market: {
+    findUnique: mockMarketFindUnique,
+  },
+  dispute: {
+    create: mockCreate,
+    updateMany: mockUpdateMany,
+  },
+};
 
 jest.mock("@prisma/client", () => {
   return {
@@ -35,6 +58,8 @@ jest.mock("@prisma/client", () => {
       eventLog: {
         findUnique: mockEventLogFindUnique,
         create: mockEventLogCreate,
+        upsert: mockEventLogUpsert,
+        updateMany: mockEventLogUpdateMany,
       },
       market: {
         findUnique: mockMarketFindUnique,
@@ -122,15 +147,22 @@ const makeUsedEvent = (type: string, txHash: string, extra: Record<string, unkno
 });
 
 function setupTransaction() {
-  mockTransaction.mockImplementation(async (cb: () => Promise<void>) => cb());
+  // Pass txMock as the first argument to the callback, matching the new
+  // interactive-transaction signature: prisma.$transaction(async (tx) => { ... })
+  mockTransaction.mockImplementation(async (cb: (tx: typeof txMock) => Promise<void>) => cb(txMock));
   mockCreateMarketRecord.mockResolvedValue({});
   mockRecordBet.mockResolvedValue({});
   mockUpdateMarketPools.mockResolvedValue(undefined);
   mockUpdateMarketStatus.mockResolvedValue({});
   mockMarkBetClaimed.mockResolvedValue({});
-  mockEventLogFindUnique.mockResolvedValue(null); // default: event not processed yet
-  mockEventLogCreate.mockResolvedValue({});
+  mockMarkBetClaimedByMarketAndBettor.mockResolvedValue({});
+  // EventLog: upsert succeeds; findUnique returns processedAt: null (not yet processed)
+  mockEventLogUpsert.mockResolvedValue({});
+  mockEventLogFindUnique.mockResolvedValue({ processedAt: null });
+  mockEventLogUpdateMany.mockResolvedValue({ count: 1 });
+  mockIndexerStateUpsert.mockResolvedValue({});
   mockMarketFindUnique.mockResolvedValue({ id: "MARKET_1" }); // market exists
+  mockEventLogCreate.mockResolvedValue({});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -201,14 +233,20 @@ describe("Issue 1 — getLastIndexedLedger / saveLastIndexedLedger", () => {
 describe("Issue 2 — processLedger", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // By default, $transaction executes its callback immediately
-    mockTransaction.mockImplementation(async (cb: () => Promise<void>) => cb());
+    // By default, $transaction executes its callback immediately with txMock
+    mockTransaction.mockImplementation(async (cb: (tx: typeof txMock) => Promise<void>) => cb(txMock));
     mockCreateMarketRecord.mockResolvedValue({});
     mockRecordBet.mockResolvedValue({});
     mockUpdateMarketPools.mockResolvedValue(undefined);
     mockUpdateMarketStatus.mockResolvedValue({});
     mockMarkBetClaimed.mockResolvedValue({});
     mockMarkBetClaimedByMarketAndBettor.mockResolvedValue({});
+    // New: set up EventLog and IndexerState mocks used inside the transaction
+    mockEventLogUpsert.mockResolvedValue({});
+    mockEventLogFindUnique.mockResolvedValue({ processedAt: null }); // not yet processed
+    mockEventLogUpdateMany.mockResolvedValue({ count: 1 });
+    mockIndexerStateUpsert.mockResolvedValue({});
+    mockMarketFindUnique.mockResolvedValue({ id: "MARKET_1" });
   });
 
   const makeEvent = (type: string, extra: Record<string, unknown> = {}): SorobanEvent => ({
@@ -359,8 +397,8 @@ describe("Issue 2 — processLedger", () => {
   });
 
   it("rolls back the entire batch if one handler throws", async () => {
-    mockTransaction.mockImplementationOnce(async (cb: () => Promise<void>) => {
-      await cb();
+    mockTransaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => Promise<void>) => {
+      await cb(txMock);
     });
     mockCreateMarketRecord.mockRejectedValueOnce(new Error("DB error"));
 
@@ -463,7 +501,7 @@ describe("Task 3 — handleMarketCreatedEvent (idempotent upsert + EventLog.proc
 
   it("marks EventLogModel.processedAt when event is successfully processed via processLedger", async () => {
     setupTransaction();
-    mockEventLogFindUnique.mockResolvedValue(null);
+    mockEventLogFindUnique.mockResolvedValue({ processedAt: null });
 
     const event = makeEvent("MarketCreated", {
       txHash: "0xLEGIT_CREATE",
@@ -484,11 +522,12 @@ describe("Task 3 — handleMarketCreatedEvent (idempotent upsert + EventLog.proc
 
     await processLedger(ledger);
 
-    // EventLog.create should have been called with processedAt
-    expect(mockEventLogCreate).toHaveBeenCalledTimes(1);
-    const logEntry = mockEventLogCreate.mock.calls[0][0];
-    expect(logEntry.data.eventType).toBe("MarketCreated");
-    expect(logEntry.data.txHash).toBe("0xLEGIT_CREATE");
+    // EventLog.updateMany should have been called to set processedAt
+    expect(mockEventLogUpdateMany).toHaveBeenCalledTimes(1);
+    const updateCall = mockEventLogUpdateMany.mock.calls[0][0];
+    expect(updateCall.where.txHash).toBe("0xLEGIT_CREATE");
+    expect(updateCall.where.eventType).toBe("MarketCreated");
+    expect(updateCall.data.processedAt).toBeInstanceOf(Date);
   });
 });
 
@@ -560,8 +599,8 @@ describe("Task 2 — handleBetPlacedEvent (atomic bet insertion + pool update)",
     setupTransaction();
     mockRecordBet.mockResolvedValue({});
     mockUpdateMarketPools.mockRejectedValueOnce(new Error("Pool update failed"));
-    mockTransaction.mockImplementationOnce(async (cb: () => Promise<void>) => {
-      await cb(); // will throw inside
+    mockTransaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => Promise<void>) => {
+      await cb(txMock); // will throw inside
     });
 
     const event = makeEvent("BetPlaced", { txHash: "0xATOMIC_TEST" });
@@ -700,8 +739,8 @@ describe("Task 1 — handleMarketResolvedEvent (out-of-order rejection)", () => 
     setupTransaction();
     // market doesn't exist
     mockMarketFindUnique.mockResolvedValueOnce(null);
-    mockTransaction.mockImplementationOnce(async (cb: () => Promise<void>) => {
-      await cb(); // will throw inside
+    mockTransaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => Promise<void>) => {
+      await cb(txMock); // will throw inside
     });
 
     const event = makeEvent("MarketResolved", {
@@ -771,9 +810,9 @@ describe("Task 4 — resume from last ledger, never reprocess on restart", () =>
     });
 
     // First event (MarketCreated) was already processed
-    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_1", txHash: "0xALREADY_DONE" });
+    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_1", txHash: "0xALREADY_DONE", processedAt: new Date("2025-07-01T00:00:00Z") });
     // Second event (BetPlaced) was NOT yet processed
-    mockEventLogFindUnique.mockResolvedValueOnce(null);
+    mockEventLogFindUnique.mockResolvedValueOnce({ processedAt: null });
 
     const ledger: LedgerData = {
       sequence: 600,
@@ -790,16 +829,16 @@ describe("Task 4 — resume from last ledger, never reprocess on restart", () =>
     expect(mockRecordBet).toHaveBeenCalledTimes(1);
     expect(mockUpdateMarketPools).toHaveBeenCalledTimes(1);
 
-    // EventLog.create called once: only for the BetPlaced event
-    expect(mockEventLogCreate).toHaveBeenCalledTimes(1);
-    expect(mockEventLogCreate.mock.calls[0][0].data.txHash).toBe("0xNOT_YET_DONE");
+    // EventLog.updateMany (processedAt stamp) called once: only for the BetPlaced event
+    expect(mockEventLogUpdateMany).toHaveBeenCalledTimes(1);
+    expect(mockEventLogUpdateMany.mock.calls[0][0].where.txHash).toBe("0xNOT_YET_DONE");
   });
 
   it("never reprocesses an already-processed event on restart", async () => {
     // All events in the ledger were already processed
-    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_1", txHash: "0xEVT_A" });
-    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_2", txHash: "0xEVT_B" });
-    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_3", txHash: "0xEVT_C" });
+    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_1", txHash: "0xEVT_A", processedAt: new Date() });
+    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_2", txHash: "0xEVT_B", processedAt: new Date() });
+    mockEventLogFindUnique.mockResolvedValueOnce({ id: "log_3", txHash: "0xEVT_C", processedAt: new Date() });
 
     const ledger: LedgerData = {
       sequence: 700,
@@ -818,8 +857,8 @@ describe("Task 4 — resume from last ledger, never reprocess on restart", () =>
     expect(mockRecordBet).not.toHaveBeenCalled();
     expect(mockUpdateMarketStatus).not.toHaveBeenCalled();
 
-    // No new EventLog entries created
-    expect(mockEventLogCreate).not.toHaveBeenCalled();
+    // No processedAt stamps set (all events already had processedAt)
+    expect(mockEventLogUpdateMany).not.toHaveBeenCalled();
   });
 
   it("saves last indexed ledger after successful batch processing", async () => {
@@ -1026,6 +1065,11 @@ describe("Task 4 — handleDisputeEvent (DisputeRaised)", () => {
     jest.clearAllMocks();
     mockCreate.mockResolvedValue({});
     mockUpdateMarketStatus.mockResolvedValue({});
+    // Required by processLedger's transaction
+    mockEventLogUpsert.mockResolvedValue({});
+    mockEventLogFindUnique.mockResolvedValue({ processedAt: null });
+    mockEventLogUpdateMany.mockResolvedValue({ count: 1 });
+    mockIndexerStateUpsert.mockResolvedValue({});
   });
 
   const makeDisputeRaisedEvent = (overrides: Record<string, unknown> = {}): SorobanEvent => ({
@@ -1044,7 +1088,7 @@ describe("Task 4 — handleDisputeEvent (DisputeRaised)", () => {
 
   it("decodes resolution_disputed event and sets market status to Disputed", async () => {
     // processLedger routes DisputeRaised to handleDisputeEvent
-    const mockTransactionFn = jest.fn(async (cb: () => Promise<void>) => cb());
+    const mockTransactionFn = jest.fn(async (cb: (tx: typeof txMock) => Promise<void>) => cb(txMock));
     mockTransaction.mockImplementationOnce(mockTransactionFn);
 
     const ledger: LedgerData = {
@@ -1059,7 +1103,7 @@ describe("Task 4 — handleDisputeEvent (DisputeRaised)", () => {
   });
 
   it("stores dispute reason for admin review UI in the Dispute table", async () => {
-    mockTransaction.mockImplementationOnce(async (cb: () => Promise<void>) => cb());
+    mockTransaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => Promise<void>) => cb(txMock));
 
     const ledger: LedgerData = {
       sequence: 200,
@@ -1077,7 +1121,7 @@ describe("Task 4 — handleDisputeEvent (DisputeRaised)", () => {
   });
 
   it("sets market status to Disputed and creates dispute record", async () => {
-    mockTransaction.mockImplementationOnce(async (cb: () => Promise<void>) => cb());
+    mockTransaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => Promise<void>) => cb(txMock));
 
     const ledger: LedgerData = {
       sequence: 300,
@@ -1093,7 +1137,7 @@ describe("Task 4 — handleDisputeEvent (DisputeRaised)", () => {
   });
 
   it("DisputeResolved sets status back to Resolved", async () => {
-    mockTransaction.mockImplementationOnce(async (cb: () => Promise<void>) => cb());
+    mockTransaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => Promise<void>) => cb(txMock));
     mockUpdateMany.mockResolvedValue({ count: 1 });
 
     const resolvedEvent: SorobanEvent = {

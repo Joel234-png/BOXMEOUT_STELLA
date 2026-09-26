@@ -2,6 +2,35 @@
 
 This directory contains the core smart contracts for the BOXMEOUT boxing prediction market on Stellar/Soroban.
 
+## Development
+
+Build artifacts in `contracts/target/` are not tracked in git.
+
+```bash
+cargo test                 # run all contract tests
+stellar contract build     # optimised wasm build (same as CI)
+```
+
+### Coverage
+
+CI runs [`cargo llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov), uploads an
+`contracts-lcov` artifact (`lcov.info`) and posts a summary to the job summary.
+To run it locally:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+cd contracts
+cargo llvm-cov --workspace --summary-only                  # terminal summary
+cargo llvm-cov --workspace --lcov --output-path lcov.info  # lcov report
+cargo llvm-cov --workspace --html --open                   # browsable HTML report
+```
+
+### Wasm size limit
+
+CI fails if any optimised `.wasm` exceeds `MAX_WASM_SIZE_BYTES` (65,536 bytes, the
+Soroban contract code size limit), configured in `.github/workflows/contracts-ci.yml`.
+
 ## Contracts
 
 ### Treasury
@@ -16,7 +45,7 @@ Manages accumulated protocol fees and implements fee collection/withdrawal logic
 - `get_balance()` - Current escrow balance
 - `get_fee_bps()` - Current fee rate
 - `get_total_fees_earned()` - Lifetime fees
-- `get_withdrawal_log()` - History of withdrawals
+- `get_withdrawal_log()` - Last 50 withdrawals (ring buffer; events hold the full history)
 
 ### Market
 Manages individual boxing prediction markets, bet placement, and claim resolution.
@@ -69,16 +98,17 @@ Emitted when a new market contract is initialized.
   - `resolved_at: u64` - Timestamp when resolved (0 at creation)
   - `dispute_window_sec: u64` - Duration of dispute period
 
-### FeesDeposited
-Emitted when a market deposits accumulated protocol fees into treasury.
+### fee_deposited
+Emitted when a market deposits accumulated protocol fees into treasury
+(via `shared::events::emit_fee_deposited`).
 
 **Topics:**
-- `Symbol("FeesDeposited")` - Event name
+- `Symbol("fee_deposited")` - Event name
 
 **Data:**
 - `Address` - Market address depositing fees
+- `Address` - Token address
 - `i128` - Amount deposited (stroops)
-- `u64` - Timestamp of deposit
 
 ### FeeBpsUpdated
 Emitted when the treasury admin updates the protocol fee rate.
@@ -89,26 +119,29 @@ Emitted when the treasury admin updates the protocol fee rate.
 **Data:**
 - `u32` - New fee rate in basis points
 
-### FeesWithdrawn
-Emitted when fees are withdrawn from the treasury.
+### fee_withdrawn
+Emitted when fees are withdrawn from the treasury
+(via `shared::events::emit_fee_withdrawn`).
 
 **Topics:**
-- `Symbol("FeesWithdrawn")` - Event name
+- `Symbol("fee_withdrawn")` - Event name
 
 **Data:**
-- `Address` - Recipient of withdrawn fees
+- `Address` - Token withdrawn
 - `i128` - Amount withdrawn (stroops)
-- `u64` - Timestamp of withdrawal
+- `Address` - Recipient of withdrawn fees
 
-### EmergencyDrain
-Emitted when the treasury is drained during a protocol pause.
+### emergency_drain
+Emitted when the treasury is drained during a protocol pause
+(via `shared::events::emit_emergency_drain`).
 
 **Topics:**
-- `Symbol("EmergencyDrain")` - Event name
-- `Address` - Recipient address
+- `Symbol("emergency_drain")` - Event name
 
 **Data:**
+- `Address` - Token drained
 - `i128` - Total amount drained (stroops)
+- `Address` - Admin executing the drain
 
 ### BetPlaced
 Emitted when a bettor places a bet on a market.
@@ -126,26 +159,55 @@ Emitted when a bettor places a bet on a market.
   - `amount: i128` - Bet amount in stroops
   - `placed_at: u64` - Timestamp of bet placement
 
-## Storage Keys
+## Storage, TTL and Upgrades
 
-### Treasury Storage
-- `"ADMIN"` → `Address` - Treasury administrator
-- `"FACTORY"` → `Address` - MarketFactory contract address
-- `"TOKEN"` → `Address` - XLM token contract address
-- `"BALANCE"` → `i128` - Current treasury balance
-- `"TOTAL_FEES"` → `i128` - Cumulative fees received (never decremented)
-- `"FEE_BPS"` → `u32` - Protocol fee rate in basis points
-- `"WITHDRAWAL_LOG"` → `Vec<(Address, i128, u64)>` - History of fee withdrawals
+All three contracts keep every key in **persistent** storage and none extends
+TTLs explicitly, so entries expire to the archive after the network's minimum
+persistent TTL from their last write and must be restored before use. The full
+per-contract key tables (key, value type, storage class, TTL), the TTL strategy
+and operator guidance are in [`docs/contracts.md` → Storage Layout](../docs/contracts.md#storage-layout).
 
-### Market Storage
-- `DataKey::MarketInfo` → `Market` - Current market state
-- `DataKey::Factory` → `Address` - MarketFactory address
-- `DataKey::Bet(bet_id)` → `Bet` - Individual bet record
-- `DataKey::BetsByAddr(address)` → `Vec<Bytes>` - Bet IDs for an address
-- `DataKey::Claimed(bet_id)` → `bool` - Whether bet has been claimed
-- `DataKey::DisputeRaised` → `bool` - Whether market is under dispute
-- `DataKey::DisputeReason` → `Bytes` - Reason for dispute
-- `"BET_COUNT"` → `u64` - Total bets placed on this market
+### Market Storage (summary)
+| Key | Type | Class |
+|---|---|---|
+| `DataKey::MarketInfo` | `Market` | persistent |
+| `DataKey::Factory` | `Address` | persistent |
+| `DataKey::Bet(bet_id)` | `Bet` | persistent |
+| `DataKey::BetsByAddr(address)` | `Vec<Bytes>` | persistent |
+| `DataKey::Claimed(bet_id)` | `bool` | persistent |
+| `DataKey::DisputeRaised` | `bool` | persistent |
+| `DataKey::DisputeReason` | `Bytes` (≤ 256 bytes) | persistent |
+| `"BET_COUNT"` | `u64` | persistent |
+
+### Treasury Storage (summary)
+| Key | Type | Class |
+|---|---|---|
+| `"ADMIN"` / `"FACTORY"` / `"TOKEN"` / `"FEE_RECIPIENT"` | `Address` | persistent |
+| `"FEE_BPS"` | `u32` | persistent |
+| `"BALANCE"` / `"TOTAL_FEES"` | `i128` | persistent |
+| `"WITHDRAWAL_LOG"` | `Vec<(Address, i128, u64)>` | persistent |
+
+### MarketFactory Storage (summary)
+| Key | Type | Class |
+|---|---|---|
+| `"ADMIN"` / `"TREASURY"` | `Address` | persistent |
+| `"MARKET_WASM_HASH"` | `BytesN<32>` | persistent |
+| `"PAUSED"` | `bool` | persistent |
+| `"MARKET_COUNT"` | `u64` | persistent |
+| `"MARKET_MAP"` | `Map<Bytes, MarketInfo>` | persistent |
+| `"ALL_MARKETS"` | `Vec<Bytes>` | persistent |
+
+### Upgrading the Market wasm
+
+`MarketFactory::upgrade_market_wasm` only changes the wasm hash used by future
+`create_market` calls. **Already-deployed markets keep their original code and
+storage**; there is no migration path through the factory. See
+[`docs/contracts.md` → Upgrade Policy](../docs/contracts.md#upgrade-policy).
+
+### Event topics
+
+Canonical event topics and the legacy topics still emitted until C-60/C-61
+land are listed in [`docs/contracts.md` → Event Topics](../docs/contracts.md#event-topics).
 
 ## Error Handling
 
@@ -182,3 +244,9 @@ Emitted when a bettor places a bet on a market.
 - `FighterB` - Fighter B wins
 - `Draw` - Match ends in draw
 - `NoContest` - DQ or injury ruling
+- `Undetermined` - Not yet resolved (sentinel; rejected by `resolve_market` / `resolve_dispute`)
+
+All shared enums and structs (`MarketStatus`, `BetSide`, `Outcome`, `Fighter`, `Bet`,
+`ClaimReceipt`, `ProtocolConfig`) are defined once in `shared/src/types.rs`. The Market
+contract re-exports them from `market/src/types.rs`, which only defines market-only types
+(the full `Market` state, `SettledOutcome`, `MarketResolved`, `WinningsClaimed`).
