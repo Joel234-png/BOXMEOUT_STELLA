@@ -2,6 +2,35 @@
 
 This directory contains the core smart contracts for the BOXMEOUT boxing prediction market on Stellar/Soroban.
 
+## Development
+
+Build artifacts in `contracts/target/` are not tracked in git.
+
+```bash
+cargo test                 # run all contract tests
+stellar contract build     # optimised wasm build (same as CI)
+```
+
+### Coverage
+
+CI runs [`cargo llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov), uploads an
+`contracts-lcov` artifact (`lcov.info`) and posts a summary to the job summary.
+To run it locally:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+cd contracts
+cargo llvm-cov --workspace --summary-only                  # terminal summary
+cargo llvm-cov --workspace --lcov --output-path lcov.info  # lcov report
+cargo llvm-cov --workspace --html --open                   # browsable HTML report
+```
+
+### Wasm size limit
+
+CI fails if any optimised `.wasm` exceeds `MAX_WASM_SIZE_BYTES` (65,536 bytes, the
+Soroban contract code size limit), configured in `.github/workflows/contracts-ci.yml`.
+
 ## Contracts
 
 ### Treasury
@@ -186,3 +215,9 @@ Emitted when a bettor places a bet on a market.
 - `FighterB` - Fighter B wins
 - `Draw` - Match ends in draw
 - `NoContest` - DQ or injury ruling
+- `Undetermined` - Not yet resolved (sentinel; rejected by `resolve_market` / `resolve_dispute`)
+
+All shared enums and structs (`MarketStatus`, `BetSide`, `Outcome`, `Fighter`, `Bet`,
+`ClaimReceipt`, `ProtocolConfig`) are defined once in `shared/src/types.rs`. The Market
+contract re-exports them from `market/src/types.rs`, which only defines market-only types
+(the full `Market` state, `SettledOutcome`, `MarketResolved`, `WinningsClaimed`).
