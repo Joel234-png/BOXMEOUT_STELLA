@@ -16,7 +16,16 @@ use types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig
 // DataKey::Claimed(id)    -> bool
 // DataKey::DisputeRaised  -> bool
 // DataKey::DisputeReason  -> Bytes
+// DataKey::DustSwept      -> bool
 // "BET_COUNT"             -> u64
+
+/// Maximum number of bets tracked per address (C-52). `claim_all` never
+/// iterates more than this many entries, keeping its cost bounded.
+pub const MAX_BETS_PER_ADDRESS: u32 = 50;
+
+/// Period after the dispute window closes during which winners are expected
+/// to claim. Once it elapses, `sweep_dust` may move rounding residue to fees.
+pub const CLAIM_WINDOW_SEC: u64 = 30 * 24 * 60 * 60;
 
 #[contracttype]
 pub enum DataKey {
@@ -27,6 +36,9 @@ pub enum DataKey {
     Claimed(Bytes),
     DisputeRaised,
     DisputeReason,
+    /// Guard flag: set to `true` once `deposit_fees` has been called on the
+    /// Treasury for this market. Prevents double-crediting (C-68).
+    FeeDeposited,
 }
 
 #[contract]
@@ -360,6 +372,11 @@ impl MarketContract {
     pub fn resolve_market(env: Env, oracle: Address, outcome: Outcome) {
         oracle.require_auth();
 
+        // `Undetermined` is the shared "not yet resolved" sentinel, not a result.
+        if outcome == Outcome::Undetermined {
+            panic!("invalid outcome");
+        }
+
         let mut market: Market = env.storage().persistent()
             .get(&DataKey::MarketInfo)
             .expect("market not initialized");
@@ -376,20 +393,37 @@ impl MarketContract {
         market.resolved_at = env.ledger().timestamp();
 
         // Draw reuses the Cancelled path so both sides receive full refunds with no fee.
+        // If nobody backed the winning side, the losing stakes would have no
+        // claimant, so fall back to refund mode as well (C-70).
+        let winning_pool_empty = winning_pool_for(&market, &outcome) == Some(0);
         market.status = match outcome {
             Outcome::NoContest | Outcome::Draw => MarketStatus::Cancelled,
+            _ if winning_pool_empty => MarketStatus::Cancelled,
             _ => MarketStatus::Resolved,
         };
         market.outcome = outcome.clone().into();
         let resolution_time = env.ledger().timestamp();
         env.storage().persistent().set(&DataKey::MarketInfo, &market);
 
-        events::emit_market_resolved(
-            &env,
-            market_id_to_u64(&market.market_id),
-            outcome.into(),
-            resolution_time,
-        );
+        if winning_pool_empty {
+            env.events().publish(
+                (Symbol::new(&env, "AutoRefund"),),
+                (market.market_id.clone(), outcome.clone()),
+            );
+        }
+
+        // Emit market_resolved event with market_id, outcome, and resolution_time
+        let market_id_u64 = u64::from_le_bytes([
+            market.market_id.as_ref()[0],
+            market.market_id.as_ref()[1],
+            market.market_id.as_ref()[2],
+            market.market_id.as_ref()[3],
+            market.market_id.as_ref()[4],
+            market.market_id.as_ref()[5],
+            market.market_id.as_ref()[6],
+            market.market_id.as_ref()[7],
+        ]);
+        events::emit_market_resolved(&env, market_id_u64, outcome, resolution_time);
     }
 
     /// Allows a winning bettor to claim their proportional share of the pool.
@@ -437,13 +471,8 @@ impl MarketContract {
             panic!("market not resolved");
         }
 
-        let outcome = market.outcome.outcome().expect("no outcome set");
-        let is_winner = match (&bet.side, &outcome) {
-            (BetSide::FighterA, Outcome::FighterA) => true,
-            (BetSide::FighterB, Outcome::FighterB) => true,
-            _ => false,
-        };
-        if !is_winner {
+        let outcome = market.outcome.clone().expect("no outcome set");
+        if !bet_wins(&bet.side, &outcome) {
             panic!("bet did not win");
         }
 
@@ -454,28 +483,39 @@ impl MarketContract {
             panic!("already claimed");
         }
 
-        let winning_pool = match outcome {
-            Outcome::FighterA => market.pool_a,
-            Outcome::FighterB => market.pool_b,
-            _ => market.pool_a.checked_add(market.pool_b).expect("pool sum overflow"),
-        };
-
-        let payout = if winning_pool > 0 {
-            let fee_amount = shared::types::calculate_fee(market.total_pool, market.protocol_fee_bp);
-            let net_pool = market.total_pool.checked_sub(fee_amount).expect("net pool underflow");
-            bet.amount
-                .checked_mul(net_pool)
-                .expect("payout overflow")
-                .checked_div(winning_pool)
-                .expect("payout div zero")
-        } else {
-            0
-        };
+        let winning_pool = winning_pool_for(&market, &outcome).expect("no winning side");
+        let payout = pro_rata_payout(bet.amount, net_pool(&market), winning_pool);
 
         // Mark claimed BEFORE any transfer (re-entrancy guard).
         env.storage().persistent().set(&DataKey::Claimed(bet_id.clone()), &true);
 
-        let receipt = shared::types::ClaimReceipt {
+        // Transfer payout from Treasury to bettor (issue #1179)
+        if payout > 0 {
+            let treasury_addr = market.treasury.clone();
+            soroban_sdk::Address::from_contract_id(&env, &treasury_addr.to_contract_id());
+            // Call release_winnings on Treasury
+            env.invoke_contract::<()>(
+                &treasury_addr,
+                &Symbol::new(&env, "release_winnings"),
+                soroban_sdk::vec![&env, env.current_contract_address(), market.market_id.clone(), bettor.clone(), soroban_sdk::IntoVal::into_val(&payout, &env)],
+            );
+        }
+
+        // Emit winnings_claimed event with market_id, claimant, and amount (payout after fee)
+        let market_id_u64 = u64::from_le_bytes([
+            market.market_id.as_ref()[0],
+            market.market_id.as_ref()[1],
+            market.market_id.as_ref()[2],
+            market.market_id.as_ref()[3],
+            market.market_id.as_ref()[4],
+            market.market_id.as_ref()[5],
+            market.market_id.as_ref()[6],
+            market.market_id.as_ref()[7],
+        ]);
+
+        // Create ClaimReceipt for event emission
+        use shared::types::ClaimReceipt;
+        let receipt = ClaimReceipt {
             bet_id: bet_id.clone(),
             bettor: bettor.clone(),
             payout,
@@ -484,6 +524,162 @@ impl MarketContract {
         events::emit_winnings_claimed(&env, market_id_to_u64(&market.market_id), receipt);
 
         payout
+    }
+
+    /// Claims every unclaimed winning bet owned by `bettor` in one call (C-71).
+    ///
+    /// Losing and already-claimed bets are skipped. At most
+    /// `MAX_BETS_PER_ADDRESS` bets are inspected. All claimed bets are marked
+    /// before the payout is emitted, and the total is paid out as a single
+    /// amount. Emits one `AllWinningsClaimed` event.
+    ///
+    /// # Returns
+    ///
+    /// Returns the total payout across all claimed bets, in stroops.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `bettor` has not authorized the call.
+    /// - The market status is not `Resolved`.
+    /// - `bettor` has no unclaimed winning bets.
+    pub fn claim_all(env: Env, bettor: Address) -> i128 {
+        bettor.require_auth();
+
+        let market = Self::read_market(&env);
+        if market.status != MarketStatus::Resolved {
+            panic!("market not resolved");
+        }
+        let outcome = market.outcome.clone().expect("no outcome set");
+        let winning_pool = winning_pool_for(&market, &outcome).expect("no winning side");
+        let net = net_pool(&market);
+
+        let bet_ids: Vec<Bytes> = env.storage().persistent()
+            .get(&DataKey::BetsByAddr(bettor.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        let mut total: i128 = 0;
+        let mut claimed_ids: Vec<Bytes> = Vec::new(&env);
+        for bet_id in bet_ids.iter().take(MAX_BETS_PER_ADDRESS as usize) {
+            let bet: Bet = match env.storage().persistent().get(&DataKey::Bet(bet_id.clone())) {
+                Some(b) => b,
+                None => continue,
+            };
+            if bet.bettor != bettor || !bet_wins(&bet.side, &outcome) {
+                continue;
+            }
+            let already_claimed: bool = env.storage().persistent()
+                .get(&DataKey::Claimed(bet_id.clone()))
+                .unwrap_or(false);
+            if already_claimed {
+                continue;
+            }
+
+            // Mark claimed BEFORE any transfer (re-entrancy guard).
+            env.storage().persistent().set(&DataKey::Claimed(bet_id.clone()), &true);
+            total = total
+                .checked_add(pro_rata_payout(bet.amount, net, winning_pool))
+                .expect("total payout overflow");
+            claimed_ids.push_back(bet_id);
+        }
+
+        if claimed_ids.is_empty() {
+            panic!("nothing to claim");
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "AllWinningsClaimed"),),
+            (market.market_id.clone(), bettor, claimed_ids, total),
+        );
+
+        total
+    }
+
+    /// Moves pro-rata rounding residue ("dust") into the treasury fee balance (C-69).
+    ///
+    /// Permissionless. Callable once the claim deadline
+    /// (`resolved_at + dispute_window_sec + CLAIM_WINDOW_SEC`) has passed.
+    /// Dust is `net_pool - Σ floor(stake * net_pool / winning_pool)` over all
+    /// winning bets, so it never touches funds owed to unclaimed winners.
+    /// Emits a `DustSwept` event.
+    ///
+    /// # Returns
+    ///
+    /// Returns the swept amount, in stroops (may be `0`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `market_id` does not match this market.
+    /// - The market status is not `Resolved`.
+    /// - The claim deadline has not passed.
+    /// - Dust has already been swept.
+    pub fn sweep_dust(env: Env, market_id: Bytes) -> i128 {
+        let market = Self::read_market(&env);
+        if market.market_id != market_id {
+            panic!("market id mismatch");
+        }
+        if market.status != MarketStatus::Resolved {
+            panic!("market not resolved");
+        }
+        let claim_deadline = market
+            .resolved_at
+            .checked_add(market.dispute_window_sec)
+            .and_then(|t| t.checked_add(CLAIM_WINDOW_SEC))
+            .expect("deadline overflow");
+        if env.ledger().timestamp() <= claim_deadline {
+            panic!("claim deadline not reached");
+        }
+        let already_swept: bool = env.storage().persistent()
+            .get(&DataKey::DustSwept)
+            .unwrap_or(false);
+        if already_swept {
+            panic!("dust already swept");
+        }
+
+        let outcome = market.outcome.clone().expect("no outcome set");
+        let winning_pool = winning_pool_for(&market, &outcome).expect("no winning side");
+        let net = net_pool(&market);
+
+        let bet_count: u64 = env.storage().persistent()
+            .get(&Symbol::new(&env, "BET_COUNT"))
+            .unwrap_or(0u64);
+        let mut owed: i128 = 0;
+        for n in 1..=bet_count {
+            let mut id_bytes = [0u8; 32];
+            id_bytes[..8].copy_from_slice(&n.to_be_bytes());
+            let bet_id = Bytes::from_array(&env, &id_bytes);
+            if let Some(bet) = env.storage().persistent().get::<_, Bet>(&DataKey::Bet(bet_id)) {
+                if bet_wins(&bet.side, &outcome) {
+                    owed = owed
+                        .checked_add(pro_rata_payout(bet.amount, net, winning_pool))
+                        .expect("owed overflow");
+                }
+            }
+        }
+        let dust = net.checked_sub(owed).expect("dust underflow");
+
+        env.storage().persistent().set(&DataKey::DustSwept, &true);
+
+        if dust > 0 {
+            env.invoke_contract::<()>(
+                &market.treasury,
+                &Symbol::new(&env, "sweep_dust"),
+                soroban_sdk::vec![
+                    &env,
+                    env.current_contract_address().into_val(&env),
+                    market.market_id.clone().into_val(&env),
+                    dust.into_val(&env),
+                ],
+            );
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "DustSwept"),),
+            (market.market_id.clone(), dust, env.ledger().timestamp()),
+        );
+
+        dust
     }
 
     /// Issues a full refund when market is Cancelled (includes Draw and NoContest outcomes).
@@ -551,12 +747,18 @@ impl MarketContract {
             .persistent()
             .set(&DataKey::Claimed(bet_id.clone()), &true);
 
-        events::emit_refund_claimed(
-            &env,
-            market_id_to_u64(&market.market_id),
-            bettor,
-            bet_id,
-            bet.amount,
+        // Transfer refund from Treasury to bettor (issue #1180)
+        let treasury_addr = market.treasury.clone();
+        soroban_sdk::Address::from_contract_id(&env, &treasury_addr.to_contract_id());
+        env.invoke_contract::<()>(
+            &treasury_addr,
+            &Symbol::new(&env, "release_winnings"),
+            soroban_sdk::vec![&env, env.current_contract_address(), market.market_id.clone(), bettor.clone(), soroban_sdk::IntoVal::into_val(&bet.amount, &env)],
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "RefundClaimed"),),
+            (bettor.clone(), bet_id, bet.amount),
         );
 
         bet.amount
@@ -656,6 +858,9 @@ impl MarketContract {
     /// - `admin` has not authorized the call or is not the configured admin.
     /// - The market status is not `Disputed`.
     pub fn resolve_dispute(env: Env, admin: Address, override_outcome: Outcome) {
+        if override_outcome == Outcome::Undetermined {
+            panic!("invalid outcome");
+        }
         admin.require_auth();
 
         let factory: Address = env
@@ -693,6 +898,11 @@ impl MarketContract {
     /// Supports two scenarios:
     /// 1. Permissionless finalization when market is Resolved and dispute window has elapsed
     /// 2. Admin-controlled finalization when market is Disputed (admin-only)
+    ///
+    /// On finalization the protocol fee (`calculate_fee(total_pool, protocol_fee_bp)`) is
+    /// credited to the Treasury via a single `deposit_fees` cross-contract call (C-68).
+    /// A `FeeDeposited` storage flag prevents double-crediting if `finalize_resolution`
+    /// is ever called again (e.g. after a dispute override).
     ///
     /// After finalization, the `claim_winnings` function becomes available.
     /// Emits a `ResolutionFinalized` event.
@@ -748,10 +958,44 @@ impl MarketContract {
             _ => panic!("market cannot be finalized in current state"),
         }
 
-        events::emit_resolution_finalized(
-            &env,
-            market_id_to_u64(&market.market_id),
-            env.ledger().timestamp(),
+        // ── C-68: Credit protocol fee to Treasury exactly once ────────────────
+        //
+        // The fee was already deducted from claim_winnings payouts; here we
+        // push the corresponding amount into the Treasury fee balance so it is
+        // trackable and withdrawable by the admin.
+        //
+        // The FeeDeposited flag prevents double-crediting if this function is
+        // ever called more than once (e.g. after a dispute override resolved the
+        // market a second time).
+        let fee_already_deposited: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeDeposited)
+            .unwrap_or(false);
+
+        if !fee_already_deposited && market.total_pool > 0 {
+            let fee_amount =
+                shared::types::calculate_fee(market.total_pool, market.protocol_fee_bp);
+            if fee_amount > 0 {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::FeeDeposited, &true);
+
+                env.invoke_contract::<()>(
+                    &market.treasury,
+                    &Symbol::new(&env, "deposit_fees"),
+                    soroban_sdk::vec![
+                        &env,
+                        market.market_id.clone().into_val(&env),
+                        fee_amount.into_val(&env),
+                    ],
+                );
+            }
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "ResolutionFinalized"),),
+            (market.market_id.clone(), env.ledger().timestamp()),
         );
     }
 
@@ -856,33 +1100,14 @@ impl MarketContract {
             None => return 0,
         };
 
-        let is_winner = match (&bet.side, &outcome) {
-            (BetSide::FighterA, Outcome::FighterA) => true,
-            (BetSide::FighterB, Outcome::FighterB) => true,
-            _ => false,
-        };
-
-        if !is_winner {
+        if !bet_wins(&bet.side, &outcome) {
             return 0;
         }
 
-        let winning_pool = match outcome {
-            Outcome::FighterA => market.pool_a,
-            Outcome::FighterB => market.pool_b,
-            _ => market.pool_a.checked_add(market.pool_b).expect("pool sum overflow"),
-        };
-
-        if winning_pool == 0 {
-            return 0;
+        match winning_pool_for(&market, &outcome) {
+            Some(winning_pool) => pro_rata_payout(bet.amount, net_pool(&market), winning_pool),
+            None => 0,
         }
-
-        let fee_amount = shared::types::calculate_fee(market.total_pool, market.protocol_fee_bp);
-        let net_pool = market.total_pool.checked_sub(fee_amount).expect("net pool underflow");
-        bet.amount
-            .checked_mul(net_pool)
-            .expect("payout overflow")
-            .checked_div(winning_pool)
-            .expect("payout div zero")
     }
 
     /// Returns current pool sizes and implied odds for both fighters.

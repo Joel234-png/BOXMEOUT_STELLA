@@ -536,15 +536,18 @@ paused             bool
 | Function | Auth required | Description |
 |---|---|---|
 | `initialize` | — | One-time setup. Stores ProtocolConfig. |
-| `create_market` | caller signs | Deploys a new Market contract for a fight. Returns `market_id`. |
+| `create_market` | caller signs | Deploys a new Market contract for a fight. `oracle` must be whitelisted (`OracleNotWhitelisted` otherwise). Returns `market_id`. |
 | `get_market_address` | — | Returns the contract address for a market_id. |
 | `get_all_markets` | — | Returns all market IDs (ordered by creation). |
 | `get_markets_paginated` | — | Returns a slice of market IDs. |
 | `update_config` | admin | Updates protocol fees, limits, and addresses. |
 | `pause_protocol` | admin | Blocks new markets and bets. |
 | `unpause_protocol` | admin | Restores normal operation. |
-| `transfer_admin` | admin | Initiates two-step admin transfer. |
-| `accept_admin` | new_admin | Completes two-step admin transfer. |
+| `propose_admin` | admin | Initiates two-step admin transfer (stores a pending admin). |
+| `accept_admin` | new_admin | Completes two-step admin transfer. Emits `admin_transferred`. |
+| `add_oracle` | admin | Adds an oracle to the whitelist. Emits `oracle_added`. |
+| `remove_oracle` | admin | Removes an oracle from the whitelist. Emits `oracle_removed`. |
+| `is_oracle_whitelisted` | — | Returns whether an oracle is whitelisted. |
 | `get_config` | — | Returns current ProtocolConfig. |
 
 ---
@@ -610,7 +613,7 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 **Condition:** New admin accepts the pending transfer via `accept_admin()`
 
 #### 3. `protocol_paused`
-**Emitted by:** `pause_protocol()`  
+**Emitted by:** `MarketFactory::pause_factory()`  
 **Topics:** `Symbol("protocol_paused")`  
 **Data fields:** (none)
 
@@ -618,7 +621,7 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 **Effect:** All markets become read-only; no new markets can be created
 
 #### 4. `protocol_unpaused`
-**Emitted by:** `unpause_protocol()`  
+**Emitted by:** `MarketFactory::unpause_factory()`  
 **Topics:** `Symbol("protocol_unpaused")`  
 **Data fields:** (none)
 
@@ -633,6 +636,22 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 - `new_value: i128` - New parameter value
 
 **Emitted when:** Protocol configuration is updated by admin
+
+#### 5a. `oracle_added`
+**Emitted by:** `MarketFactory::add_oracle()`  
+**Topics:** `Symbol("oracle_added")`  
+**Data fields:**
+- `oracle: Address` - Oracle added to the whitelist
+
+**Emitted when:** Admin whitelists an oracle. Only whitelisted oracles can be named in `create_market()`; any other address returns `OracleNotWhitelisted`.
+
+#### 5b. `oracle_removed`
+**Emitted by:** `MarketFactory::remove_oracle()`  
+**Topics:** `Symbol("oracle_removed")`  
+**Data fields:**
+- `oracle: Address` - Oracle removed from the whitelist
+
+**Emitted when:** Admin removes an oracle. Existing markets are unaffected; new markets can no longer name it.
 
 ---
 
@@ -746,6 +765,29 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 
 ### Treasury Events
 
+All Treasury events are emitted through the `shared::events` helpers so the
+backend indexer sees one consistent set of snake_case topic names. The legacy
+ad-hoc topics `BetDeposited`, `FeesDeposited`, `FeesWithdrawn` and `EmrgDrain`
+are no longer emitted.
+
+| Treasury function | Helper | Topic |
+|---|---|---|
+| `deposit()` | `emit_bet_deposited` | `bet_deposited` |
+| `deposit_fees()` | `emit_fee_deposited` | `fee_deposited` |
+| `withdraw_fees()` | `emit_fee_withdrawn` | `fee_withdrawn` |
+| `emergency_drain()` | `emit_emergency_drain` | `emergency_drain` |
+
+#### 14a. `bet_deposited`
+**Emitted by:** `deposit()`  
+**Topics:** `Symbol("bet_deposited")`  
+**Data fields:**
+- `market: Address` - Market contract escrowing the bet
+- `bettor: Address` - Bettor whose stake was escrowed
+- `market_id: Bytes` - Market identifier
+- `amount: i128` - Stake amount in stroops
+
+**Emitted when:** A market escrows a bettor's stake in the treasury
+
 #### 15. `fee_deposited`
 **Emitted by:** `deposit_fees()`  
 **Topics:** `Symbol("fee_deposited")`  
@@ -781,7 +823,7 @@ All events are emitted via `env.events().publish()` and indexed by topic. Events
 **Security:** Emergency-only operation; signals protocol shutdown
 
 #### 18. `contract_upgraded`
-**Emitted by:** Contract upgrade function  
+**Emitted by:** `MarketFactory::upgrade_market_wasm()`  
 **Topics:** `Symbol("contract_upgraded")`  
 **Data fields:**
 - `new_wasm_hash: BytesN<32>` - SHA256 hash of new contract code
@@ -906,3 +948,74 @@ Outcome::Draw → status = Cancelled → claim_refund() (full bet.amount, no fee
 | `BALANCE` | `i128` | Current XLM balance in stroops |
 | `TOTAL_FEES_EARNED` | `i128` | Lifetime cumulative fees |
 | `WITHDRAWAL_LOG` | `Vec<(Address, i128, u64)>` | Past withdrawals |
+
+---
+
+## Protocol Fee — Single Source of Truth (C-67)
+
+**Decision**: `Market.protocol_fee_bp` is the authoritative fee rate for a given market.
+
+### Rationale
+
+The fee rate was previously duplicated across three locations:
+
+| Location | Field | Problem |
+|---|---|---|
+| `Market` | `protocol_fee_bp` | Snapshotted at creation, used for payouts |
+| `Treasury` | `fee_bps` | Runtime-tunable, not read by Market |
+| `MarketFactory` `ProtocolConfig` | `default_fee_bp` | Used only at market creation |
+
+This led to the displayed fee (from Treasury/Factory) diverging from the charged fee (from Market).
+
+### Resolution
+
+- `Market.protocol_fee_bp` is **snapshotted from `ProtocolConfig.default_fee_bp`** at market creation time via the `initialize` call from the factory. It never changes for the lifetime of that market.
+- `Treasury.fee_bps` is tunable via `set_fee_bps` (C-66) and controls the *default* rate used for **newly created markets**. It does not retroactively alter already-deployed markets.
+- `MarketFactory.ProtocolConfig.default_fee_bp` feeds into every new `Market.initialize` call.
+
+### Flow
+
+```
+set_fee_bps(new_bps) → Treasury.fee_bps
+                              ↓
+          Factory reads Treasury.fee_bps when building ProtocolConfig
+                              ↓
+          create_market() snapshots ProtocolConfig.default_fee_bp
+                              ↓
+          Market.initialize(protocol_fee_bp = default_fee_bp)  ← immutable per market
+                              ↓
+          claim_winnings uses Market.protocol_fee_bp for payout math
+                              ↓
+          finalize_resolution calls Treasury.deposit_fees(fee_amount)  ← C-68
+```
+
+### Deprecated / Removed Fields
+
+- `Market.fee_collector_address` — fee routing now goes through `Treasury` directly; the address is stored once in `Treasury.fee_recipient` and configurable via `set_fee_recipient` (C-65).
+
+---
+
+## Treasury Admin Rotation (C-65)
+
+Treasury admin transfers use a **two-step propose/accept pattern** to prevent mistyped addresses locking the contract permanently.
+
+```
+current_admin  → propose_admin(new_admin)   # stores PENDING_ADMIN
+new_admin      → accept_admin()             # swaps ADMIN, clears PENDING_ADMIN
+```
+
+Until `accept_admin` is called, the current admin retains all privileges and may overwrite the proposal by calling `propose_admin` again.
+
+### Fee Recipient Updates
+
+`set_fee_recipient(admin, new_recipient)` updates the address that receives fee withdrawals and emits a `fee_recipient_updated` event. Only the stored admin may call it.
+
+---
+
+## Treasury Fee Crediting (C-68)
+
+On `finalize_resolution`, the Market contract calls `Treasury.deposit_fees(market_id, fee_amount)` **exactly once**. A `FeeDeposited` boolean flag in Market storage prevents double-crediting if `finalize_resolution` is called again (e.g. after a dispute is resolved).
+
+The fee amount equals `calculate_fee(market.total_pool, market.protocol_fee_bp)`.
+
+Cancelled markets (Draw / NoContest / admin cancel) do **not** call `deposit_fees`; they refund the full pool to bettors with no fee deducted.
