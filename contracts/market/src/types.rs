@@ -19,8 +19,11 @@ pub use shared::types::{
 };
 
 /// Post-resolution outcome stored in Market. Pending until the market resolves.
+///
+/// Used instead of `Option<Outcome>`, which `#[contracttype]` structs cannot
+/// serialise for unit enums.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettledOutcome {
     Pending,
     FighterA,
@@ -46,7 +49,7 @@ pub struct Market {
     pub total_pool: i128,
     pub protocol_fee_bp: u32,
     pub oracle_address: Address,
-    pub outcome: Option<Outcome>,
+    pub outcome: SettledOutcome,
     pub fee_collector_address: Address,
     pub resolved_at: u64,
     pub dispute_window_sec: u64,
@@ -70,4 +73,29 @@ pub struct WinningsClaimed {
     pub payout: i128,
     pub fee_paid: i128,
     pub claimed_at: u64,
+}
+
+// ─── Conversions to shared event types ────────────────────────────────────────
+// The Market contract's enums are symbol-encoded while shared::types uses
+// integer discriminants, so values are converted explicitly before being
+// handed to shared::events.
+
+impl From<Outcome> for shared::types::Outcome {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::FighterA => shared::types::Outcome::FighterA,
+            Outcome::FighterB => shared::types::Outcome::FighterB,
+            Outcome::Draw => shared::types::Outcome::Draw,
+            Outcome::NoContest => shared::types::Outcome::NoContest,
+        }
+    }
+}
+
+impl From<BetSide> for shared::types::BetSide {
+    fn from(side: BetSide) -> Self {
+        match side {
+            BetSide::FighterA => shared::types::BetSide::FighterA,
+            BetSide::FighterB => shared::types::BetSide::FighterB,
+        }
+    }
 }

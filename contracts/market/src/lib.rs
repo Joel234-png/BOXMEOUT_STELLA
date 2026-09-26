@@ -2,11 +2,11 @@
 
 pub mod types;
 
+use shared::{events, market_id_to_u64};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, IntoVal, String,
-    Symbol, Vec,
+    contract, contractimpl, contracttype, Address, Bytes, Env, IntoVal, String, Symbol, Vec,
 };
-use types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketResolved, MarketStatus, Outcome, ProtocolConfig, WinningsClaimed};
+use types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig, SettledOutcome};
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // DataKey::MarketInfo     -> Market
@@ -119,7 +119,7 @@ impl MarketContract {
             total_pool: 0,
             protocol_fee_bp,
             oracle_address: oracle,
-            outcome: None,
+            outcome: SettledOutcome::Pending,
             fee_collector_address: fee_collector,
             resolved_at: 0,
             dispute_window_sec,
@@ -257,15 +257,18 @@ impl MarketContract {
 
         Self::write_market(&env, &market);
 
-        env.events().publish(
-            (Symbol::new(&env, "bet_placed"),),
-            BetPlacedEvent {
+        let market_id_u64 = market_id_to_u64(&market.market_id);
+        events::emit_bet_placed(
+            &env,
+            market_id_u64,
+            shared::types::BetRecord {
                 bet_id: bet_id.clone(),
-                market_id: market.market_id.clone(),
                 bettor,
-                side,
+                market_id: market_id_u64,
+                side: side.into(),
                 amount,
-                placed_at: env.ledger().timestamp(),
+                placed_at,
+                claimed: false,
             },
         );
 
@@ -302,9 +305,10 @@ impl MarketContract {
         market.status = MarketStatus::Cancelled;
         Self::write_market(&env, &market);
 
-        env.events().publish(
-            (Symbol::new(&env, "MarketCancelled"),),
-            market.market_id.clone(),
+        events::emit_market_cancelled(
+            &env,
+            market_id_to_u64(&market.market_id),
+            String::from_str(&env, "cancelled_by_admin"),
         );
     }
 
@@ -343,10 +347,7 @@ impl MarketContract {
         market.status = MarketStatus::Locked;
         Self::write_market(&env, &market);
 
-        env.events().publish(
-            (Symbol::new(&env, "MarketLocked"),),
-            (market.market_id.clone(), now),
-        );
+        events::emit_market_locked(&env, market_id_to_u64(&market.market_id), now);
     }
 
     /// Called by oracle after fight concludes.
@@ -400,7 +401,7 @@ impl MarketContract {
             _ if winning_pool_empty => MarketStatus::Cancelled,
             _ => MarketStatus::Resolved,
         };
-        market.outcome = Some(outcome.clone());
+        market.outcome = outcome.clone().into();
         let resolution_time = env.ledger().timestamp();
         env.storage().persistent().set(&DataKey::MarketInfo, &market);
 
@@ -520,7 +521,7 @@ impl MarketContract {
             payout,
             claimed_at: env.ledger().timestamp(),
         };
-        events::emit_winnings_claimed(&env, market_id_u64, receipt);
+        events::emit_winnings_claimed(&env, market_id_to_u64(&market.market_id), receipt);
 
         payout
     }
@@ -724,7 +725,7 @@ impl MarketContract {
         let is_eligible = match market.status {
             MarketStatus::Cancelled => true,
             MarketStatus::Resolved => {
-                market.outcome.clone().map(|o| matches!(o, Outcome::NoContest)).unwrap_or(false)
+                market.outcome == SettledOutcome::NoContest
             }
             _ => false,
         };
@@ -831,9 +832,11 @@ impl MarketContract {
         env.storage().persistent().set(&DataKey::DisputeRaised, &true);
         env.storage().persistent().set(&DataKey::DisputeReason, &reason);
 
-        env.events().publish(
-            (Symbol::new(&env, "resolution_disputed"),),
-            (market.market_id.clone(), bettor.clone(), reason),
+        events::emit_resolution_disputed(
+            &env,
+            market_id_to_u64(&market.market_id),
+            bettor,
+            reason,
         );
     }
 
@@ -879,13 +882,14 @@ impl MarketContract {
             panic!("market not in disputed state");
         }
 
-        market.outcome = Some(override_outcome.clone());
+        market.outcome = override_outcome.clone().into();
         market.status = MarketStatus::Resolved;
         Self::write_market(&env, &market);
 
-        env.events().publish(
-            (Symbol::new(&env, "DisputeResolved"),),
-            (market.market_id.clone(), override_outcome),
+        events::emit_dispute_resolved(
+            &env,
+            market_id_to_u64(&market.market_id),
+            override_outcome.into(),
         );
     }
 
@@ -1091,7 +1095,7 @@ impl MarketContract {
             .get(&DataKey::MarketInfo)
             .expect("market not initialized");
 
-        let outcome = match market.outcome.clone() {
+        let outcome = match market.outcome.outcome() {
             Some(o) => o,
             None => return 0,
         };
@@ -1211,218 +1215,21 @@ impl MarketContract {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
-    use shared::test_utils::{create_test_address, create_test_env};
-    use shared::types::{Fighter, MarketStatus};
-    use soroban_sdk::String;
-
-    fn make_fighter(env: &Env, name: &str) -> Fighter {
-        Fighter {
-            name:         String::from_str(env, name),
-            record:       String::from_str(env, "10-0"),
-            nationality:  String::from_str(env, "US"),
-            weight_class: String::from_str(env, "Heavyweight"),
-        }
-    }
-
-    fn initialize_market(env: &Env, client: &MarketContractClient) {
-        let oracle      = create_test_address(env);
-        let factory     = create_test_address(env);
-        let fee_col     = create_test_address(env);
-    fn addr_from_u8(env: &Env, v: u8) -> Address {
-        let b = BytesN::from_array(env, &[v; 32]);
-        Address::from_account_id(env, &b)
-    }
-
-    fn default_market(env: &Env, status: MarketStatus) -> Market {
-        Market {
-            market_id: Bytes::from_array(env, &[0u8; 32]),
-            fighter_a: Fighter {
-                name: "A".into_val(env),
-                record: "0-0-0".into_val(env),
-                nationality: "USA".into_val(env),
-                weight_class: "Heavy".into_val(env),
-            },
-            fighter_b: Fighter {
-                name: "B".into_val(env),
-                record: "0-0-0".into_val(env),
-                nationality: "BRA".into_val(env),
-                weight_class: "Heavy".into_val(env),
-            },
-            scheduled_at: 1,
-            betting_ends_at: 1,
-            created_at: 1,
-            created_by: addr_from_u8(env, 1),
-            status,
-            pool_a: 0,
-            pool_b: 0,
-            total_pool: 0,
-            protocol_fee_bp: 100,
-            oracle_address: addr_from_u8(env, 2),
-            outcome: None,
-            fee_collector_address: addr_from_u8(env, 3),
-        }
-    }
-
-    #[test]
-    fn test_resolve_market_emits_event() {
-        let env = Env::default();
-        let market = default_market(&env, MarketStatus::Locked);
-        env.storage().set(&Symbol::short("MARKET_INFO"), &market);
-
-        let outcome = Outcome::FighterA;
-        MarketContract::resolve_market(env.clone(), market.oracle_address.clone(), outcome.clone());
-
-        let events = env.events().all();
-        assert_eq!(events.len(), 1);
-        let (topic, data_raw) = events[0].clone();
-        let data: MarketResolved = data_raw.try_into().unwrap();
-        assert_eq!(topic, Symbol::short("MarketResolved"));
-        assert_eq!(data.market_id, market.market_id);
-        assert_eq!(data.outcome, outcome);
-        assert_eq!(data.resolved_at, env.ledger().timestamp());
-    }
-
-    #[test]
-    fn test_resolve_market_emits_event_for_nocontest() {
-        let env = Env::default();
-        let market = default_market(&env, MarketStatus::Locked);
-        env.storage().set(&Symbol::short("MARKET_INFO"), &market);
-
-        let outcome = Outcome::NoContest;
-        MarketContract::resolve_market(env.clone(), market.oracle_address.clone(), outcome.clone());
-
-        let events = env.events().all();
-        assert_eq!(events.len(), 1);
-        let (topic, data_raw) = events[0].clone();
-        let data: MarketResolved = data_raw.try_into().unwrap();
-        assert_eq!(topic, Symbol::short("MarketResolved"));
-        assert_eq!(data.market_id, market.market_id);
-        assert_eq!(data.outcome, outcome);
-        assert_eq!(data.resolved_at, env.ledger().timestamp());
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use soroban_sdk::testutils::Address as _;
-
-    #[test]
-    fn place_bet_emits_bet_placed_event() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, MarketContract);
-        let client = MarketContractClient::new(&env, &contract_id);
-
-        let bettor = Address::generate(&env);
-        let oracle = Address::generate(&env);
-        let fighter_a = Fighter {
-            name: String::from_str(&env, "A"),
-            record: String::from_str(&env, "10-0"),
-            nationality: String::from_str(&env, "US"),
-            weight_class: String::from_str(&env, "Heavyweight"),
-        };
-        let fighter_b = Fighter {
-            name: String::from_str(&env, "B"),
-            record: String::from_str(&env, "9-1"),
-            nationality: String::from_str(&env, "MX"),
-            weight_class: String::from_str(&env, "Heavyweight"),
-        };
-        let market_id = Bytes::from_array(&[1u8; 32]);
-        client.initialize(
-            &Bytes::from_array(env, &[1u8; 32]),
-            &make_fighter(env, "Alpha"),
-            &make_fighter(env, "Beta"),
-            &1_000_000u64,
-            &900_000u64,
-            &oracle,
-            &factory,
-            &200u32,
-            &fee_col,
-        );
-    }
-
-    /// Demonstrates the test harness: register contract, initialize, read back state.
-    #[test]
-    fn test_harness_initialize_and_read() {
-        let env = create_test_env();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, MarketContract);
-        let client      = MarketContractClient::new(&env, &contract_id);
-
-        initialize_market(&env, &client);
-
-        let market = client.get_market_info();
-        assert_eq!(market.pool_a, 0);
-        assert_eq!(market.pool_b, 0);
-        assert_eq!(market.total_pool, 0);
-        assert!(matches!(market.status, MarketStatus::Open));
-    }
-
-    #[test]
-    fn test_harness_get_pool_odds_empty_market() {
-        let env = create_test_env();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, MarketContract);
-        let client      = MarketContractClient::new(&env, &contract_id);
-        initialize_market(&env, &client);
-
-        let (pool_a, pool_b, odds_a, odds_b) = client.get_pool_odds();
-        assert_eq!(pool_a, 0);
-        assert_eq!(pool_b, 0);
-        assert_eq!(odds_a, 5_000);
-        assert_eq!(odds_b, 5_000);
-    }
-
-    #[test]
-    fn test_claim_refund_after_cancellation() {
-        let env = create_test_env();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, MarketContract);
-        let client      = MarketContractClient::new(&env, &contract_id);
-        initialize_market(&env, &client);
-
-        let bettor = create_test_address(&env);
-        let bet_id = Bytes::from_array(&env, &[9u8; 32]);
-        let amount = 500_000i128;
-
-        // Directly seed a bet and a Cancelled market in storage for refund testing.
-        env.as_contract(&contract_id, || {
-            let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-            market.status  = MarketStatus::Cancelled;
-            market.pool_a  = amount;
-            market.total_pool = amount;
-            env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-            let bet = Bet {
-                bet_id:    bet_id.clone(),
-                market_id: market.market_id.clone(),
-                bettor:    bettor.clone(),
-                side:      BetSide::FighterA,
-                amount,
-                placed_at: 0,
-                claimed:   false,
-            };
-            env.storage().persistent().set(&DataKey::Bet(bet_id.clone()), &bet);
-        });
-
-        let refund = client.claim_refund(&bettor, &bet_id);
-        assert_eq!(refund, amount);
-
-        // Second call must panic (already claimed).
-        let result = client.try_claim_refund(&bettor, &bet_id);
-        assert!(result.is_err());
-    }
+    use shared::event_parser::*;
+    use std::string::ToString;
+    use shared::test_utils::{event_count, last_event, last_event_name};
     use soroban_sdk::{
         contract, contractimpl,
-        testutils::{Address as _, Events, Ledger},
-        Env, String, Symbol,
+        testutils::{Address as _, Ledger},
     };
 
-    // ─── Mock factory ──────────────────────────────────────────────────────────
+    const NONCE: u64 = 7;
+    const BETTING_ENDS_AT: u64 = 1_000;
+
+    // ─── Mocks ────────────────────────────────────────────────────────────────
 
     #[contract]
     struct MockFactory;
@@ -1430,848 +1237,288 @@ mod test {
     #[contractimpl]
     impl MockFactory {
         pub fn __constructor(env: Env, admin: Address) {
-            env.storage()
-                .persistent()
-                .set(&Symbol::new(&env, "admin"), &admin);
+            env.storage().persistent().set(&Symbol::new(&env, "admin"), &admin);
         }
 
         pub fn get_config(env: Env) -> ProtocolConfig {
-            let admin: Address = env
-                .storage()
-                .persistent()
-                .get(&Symbol::new(&env, "admin"))
-                .unwrap();
+            let admin: Address = env.storage().persistent().get(&Symbol::new(&env, "admin")).unwrap();
             ProtocolConfig {
                 admin: admin.clone(),
                 fee_collector: admin,
                 default_fee_bp: 200,
                 min_bet_amount: 100,
-                max_bet_amount: 100_000,
+                max_bet_amount: 1_000_000,
                 dispute_window_sec: 86_400,
                 paused: false,
             }
         }
     }
 
+    /// Accepts escrow deposits without moving tokens.
+    #[contract]
+    struct MockTreasury;
+
+    #[contractimpl]
+    impl MockTreasury {
+        pub fn deposit(_env: Env, _from_market: Address, _market_id: Bytes, _bettor: Address, _amount: i128) {}
+    }
+
     // ─── Setup ────────────────────────────────────────────────────────────────
 
-    fn make_fighters(env: &Env) -> (Fighter, Fighter) {
-        (
-            Fighter {
-                name: String::from_str(env, "Alpha"),
-                record: String::from_str(env, "10-0"),
-                nationality: String::from_str(env, "US"),
-                weight_class: String::from_str(env, "Heavyweight"),
-            },
-            Fighter {
-                name: String::from_str(env, "Beta"),
-                record: String::from_str(env, "9-1"),
-                nationality: String::from_str(env, "MX"),
-                weight_class: String::from_str(env, "Heavyweight"),
-            },
-        )
+    struct Ctx {
+        env: Env,
+        client: MarketContractClient<'static>,
+        admin: Address,
+        oracle: Address,
+        market_id: Bytes,
     }
 
-    /// Returns (env, client, bettor, admin, betting_ends_at).
-    fn setup(betting_ends_at_offset: u64) -> (Env, MarketContractClient<'static>, Address, Address, u64) {
+    fn fighter(env: &Env, name: &str) -> Fighter {
+        Fighter {
+            name: String::from_str(env, name),
+            record: String::from_str(env, "10-0"),
+            nationality: String::from_str(env, "US"),
+            weight_class: String::from_str(env, "Heavyweight"),
+        }
+    }
+
+    /// Builds a market_id the same way MarketFactory::create_market does.
+    fn factory_market_id(env: &Env, nonce: u64) -> Bytes {
+        let mut id = [0xABu8; 32];
+        id[0..8].copy_from_slice(&nonce.to_le_bytes());
+        Bytes::from_array(env, &id)
+    }
+
+    fn setup() -> Ctx {
         let env = Env::default();
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let factory_id = env.register(MockFactory, (admin.clone(),));
-
-        let bettor = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let fee_collector = Address::generate(&env);
-
-        let now = env.ledger().timestamp();
-        let betting_ends_at = now + betting_ends_at_offset;
-
-        let market_cid = env.register(MarketContract, ());
-        let client = MarketContractClient::new(&env, &market_cid);
-
-        let (fa, fb) = make_fighters(&env);
-        client.initialize(
-            &Bytes::from_array(&env, &[1u8; 32]),
-            &fa,
-            &fb,
-            &(betting_ends_at + 1000),
-            &betting_ends_at,
-            &oracle,
-            &factory_id,
-            &200u32,
-            &fee_collector,
-        );
-
-        (env, client, bettor, admin, betting_ends_at)
-    }
-
-    // ─── Issue 1: betting deadline ────────────────────────────────────────────
-
-    /// Full Draw flow: resolve_market(Draw) sets status=Cancelled, both sides
-    /// can claim full refunds, and no fee is deducted from either bettor.
-    #[test]
-    fn test_draw_outcome_full_refund_both_sides() {
-        let env = create_test_env();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, MarketContract);
-        let client      = MarketContractClient::new(&env, &contract_id);
-        initialize_market(&env, &client);
-
-        let bettor_a    = create_test_address(&env);
-        let bettor_b    = create_test_address(&env);
-        let bet_id_a    = Bytes::from_array(&env, &[0xaau8; 32]);
-        let bet_id_b    = Bytes::from_array(&env, &[0xbbu8; 32]);
-        let amount_a    = 300_000i128;
-        let amount_b    = 700_000i128;
-        let oracle      = create_test_address(&env);
-
-        // Seed two bets and a Locked market directly in storage.
-        env.as_contract(&contract_id, || {
-            let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-            market.status     = MarketStatus::Locked;
-            market.pool_a     = amount_a;
-            market.pool_b     = amount_b;
-            market.total_pool = amount_a.checked_add(amount_b).expect("total_pool overflow");
-            market.oracle_address = oracle.clone();
-            env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-            let bet_a = Bet {
-                bet_id:    bet_id_a.clone(),
-                market_id: market.market_id.clone(),
-                bettor:    bettor_a.clone(),
-                side:      BetSide::FighterA,
-                amount:    amount_a,
-                placed_at: 0,
-                claimed:   false,
-            };
-            env.storage().persistent().set(&DataKey::Bet(bet_id_a.clone()), &bet_a);
-
-            let bet_b = Bet {
-                bet_id:    bet_id_b.clone(),
-                market_id: market.market_id.clone(),
-                bettor:    bettor_b.clone(),
-                side:      BetSide::FighterB,
-                amount:    amount_b,
-                placed_at: 0,
-                claimed:   false,
-            };
-            env.storage().persistent().set(&DataKey::Bet(bet_id_b.clone()), &bet_b);
-        });
-
-        // Resolving with Draw must flip status to Cancelled.
-        client.resolve_market(&oracle, &Outcome::Draw);
-
-        let market = client.get_market_info();
-        assert!(
-            matches!(market.status, MarketStatus::Cancelled),
-            "Draw outcome must set status to Cancelled"
-        );
-        assert!(matches!(market.outcome, Some(Outcome::Draw)));
-
-        // Both sides must receive full refunds with no fee.
-        let refund_a = client.claim_refund(&bettor_a, &bet_id_a);
-        let refund_b = client.claim_refund(&bettor_b, &bet_id_b);
-
-        assert_eq!(refund_a, amount_a, "bettor_a should receive full refund");
-        assert_eq!(refund_b, amount_b, "bettor_b should receive full refund");
-
-        // Neither bettor can claim again.
-        assert!(client.try_claim_refund(&bettor_a, &bet_id_a).is_err());
-        assert!(client.try_claim_refund(&bettor_b, &bet_id_b).is_err());
-    }
-
-    #[test]
-    fn test_draw_via_claim_winnings_rejected() {
-        // After a Draw, the market is Cancelled so claim_winnings must fail.
-        let env = create_test_env();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, MarketContract);
-        let client      = MarketContractClient::new(&env, &contract_id);
-        initialize_market(&env, &client);
-
-        let bettor = create_test_address(&env);
-        let bet_id = Bytes::from_array(&env, &[0xddu8; 32]);
-        let oracle = create_test_address(&env);
-
-        env.as_contract(&contract_id, || {
-            let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-            market.status = MarketStatus::Locked;
-            market.oracle_address = oracle.clone();
-            env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-            let bet = Bet {
-                bet_id:    bet_id.clone(),
-                market_id: market.market_id.clone(),
-                bettor:    bettor.clone(),
-                side:      BetSide::FighterA,
-                amount:    100_000,
-                placed_at: 0,
-                claimed:   false,
-            };
-            env.storage().persistent().set(&DataKey::Bet(bet_id.clone()), &bet);
-        });
-
-        client.resolve_market(&oracle, &Outcome::Draw);
-
-        // claim_winnings requires status==Resolved; Draw→Cancelled so this must fail.
-        assert!(client.try_claim_winnings(&bettor, &bet_id).is_err());
-    fn test_bet_exactly_at_deadline_succeeds() {
-        let (env, client, bettor, _admin, betting_ends_at) = setup(1000);
-
-        env.ledger().with_mut(|l| l.timestamp = betting_ends_at);
-        let bet_id = client.place_bet(&bettor, &BetSide::FighterA, &500i128);
-
-        let bet = client.get_bet(&bet_id);
-        assert_eq!(bet.amount, 500);
-        assert_eq!(bet.bettor, bettor);
-    }
-
-    #[test]
-    #[should_panic(expected = "betting period has ended")]
-    fn test_bet_one_second_after_deadline_panics() {
-        let (env, client, bettor, _admin, betting_ends_at) = setup(1000);
-
-        env.ledger().with_mut(|l| l.timestamp = betting_ends_at + 1);
-        client.place_bet(&bettor, &BetSide::FighterA, &500i128);
-    }
-
-    // ─── Issue 2: cancel_market ───────────────────────────────────────────────
-
-    #[test]
-    fn test_cancel_open_market_succeeds() {
-        let (env, client, _bettor, admin, _ends_at) = setup(1000);
-        client.cancel_market(&admin);
-
-        let market = client.get_market_info();
-        assert_eq!(market.status, MarketStatus::Cancelled);
-    }
-
-    #[test]
-    fn test_cancel_locked_market_succeeds() {
-        let (env, client, _bettor, admin, _ends_at) = setup(1000);
-
-        // Force status to Locked directly in storage
-        env.as_contract(&client.address, || {
-            let mut m: Market = env
-                .storage()
-                .persistent()
-                .get(&DataKey::MarketInfo)
-                .unwrap();
-            m.status = MarketStatus::Locked;
-            env.storage().persistent().set(&DataKey::MarketInfo, &m);
-        });
-
-        client.cancel_market(&admin);
-        let market = client.get_market_info();
-        assert_eq!(market.status, MarketStatus::Cancelled);
-    }
-
-    #[test]
-    #[should_panic(expected = "cannot cancel: market already resolved or cancelled")]
-    fn test_cancel_resolved_market_panics() {
-        let (env, client, _bettor, admin, _ends_at) = setup(1000);
-
-        env.as_contract(&client.address, || {
-            let mut m: Market = env
-                .storage()
-                .persistent()
-                .get(&DataKey::MarketInfo)
-                .unwrap();
-            m.status = MarketStatus::Resolved;
-            env.storage().persistent().set(&DataKey::MarketInfo, &m);
-        });
-
-        client.cancel_market(&admin);
-    }
-
-    #[test]
-    #[should_panic(expected = "cannot cancel: market already resolved or cancelled")]
-    fn test_cancel_already_cancelled_market_panics() {
-        let (env, client, _bettor, admin, _ends_at) = setup(1000);
-
-        env.as_contract(&client.address, || {
-            let mut m: Market = env
-                .storage()
-                .persistent()
-                .get(&DataKey::MarketInfo)
-                .unwrap();
-            m.status = MarketStatus::Cancelled;
-            env.storage().persistent().set(&DataKey::MarketInfo, &m);
-        });
-
-        client.cancel_market(&admin);
-    }
-
-    #[test]
-    fn test_cancel_market_emits_event() {
-        let (env, client, _bettor, admin, _ends_at) = setup(1000);
-        client.cancel_market(&admin);
-
-        // At least one event must be emitted (the MarketCancelled event).
-        let events = env.events().all();
-        assert!(!events.events().is_empty(), "MarketCancelled event not emitted");
-    }
-
-    #[test]
-    fn test_all_bettors_can_claim_refund_after_cancel() {
-        let (env, client, bettor, admin, _ends_at) = setup(1000);
-
-        let bet_id = client.place_bet(&bettor, &BetSide::FighterA, &500i128);
-        client.cancel_market(&admin);
-        let refund = client.claim_refund(&bettor, &bet_id);
-        assert_eq!(refund, 500);
-    }
-
-    #[test]
-    #[should_panic(expected = "already claimed")]
-    fn test_claim_refund_twice_panics() {
-        let (env, client, bettor, admin, _ends_at) = setup(1000);
-
-        let bet_id = client.place_bet(&bettor, &BetSide::FighterA, &500i128);
-        client.cancel_market(&admin);
-        client.claim_refund(&bettor, &bet_id);
-        client.claim_refund(&bettor, &bet_id);
-    }
-
-    // ─── Issue 3: auth — unauthorized calls must panic ─────────────────────────
-
-    #[test]
-    #[should_panic]
-    fn test_resolve_dispute_unauthorized_panics() {
-        let env = Env::default();
-        // Do NOT call env.mock_all_auths() — auth check must fire
-
-        let admin = Address::generate(&env);
-        let factory_id = env.register(MockFactory, (admin.clone(),));
-        let oracle = Address::generate(&env);
-        let fee_collector = Address::generate(&env);
-        let (fa, fb) = make_fighters(&env);
-
-        let market_cid = env.register(MarketContract, ());
-        let client = MarketContractClient::new(&env, &market_cid);
-
-        // initialize has no require_auth, so no mocking needed.
-        client.initialize(
-            &Bytes::from_array(&env, &[1u8; 32]),
-            &fa,
-            &fb,
-            &2000u64,
-            &1000u64,
-            &oracle,
-            &factory_id,
-            &200u32,
-            &fee_collector,
-        );
-
-        // Force Disputed status directly in storage (no auth needed).
-        env.as_contract(&market_cid, || {
-            let mut m: Market = env
-                .storage()
-                .persistent()
-                .get(&DataKey::MarketInfo)
-                .unwrap();
-            m.status = MarketStatus::Disputed;
-            env.storage().persistent().set(&DataKey::MarketInfo, &m);
-        });
-
-        // Attacker never received authorization — require_auth() panics.
-        let attacker = Address::generate(&env);
-        client.resolve_dispute(&attacker, &Outcome::FighterA);
-    }
-
-    // ── get_pool_odds ───────────────────────────────────────────────────────
-
-    #[test]
-    fn test_get_pool_odds_zero_pool_returns_even_split() {
-        let (env, _, _) = setup_test_env();
-        let (pool_a, pool_b, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
-        assert_eq!(pool_a, 0);
-        assert_eq!(pool_b, 0);
-        assert_eq!(odds_a, 5000);
-        assert_eq!(odds_b, 5000);
-    }
-
-    #[test]
-    fn test_get_pool_odds_with_uneven_pools() {
-        let (env, bettor, _) = setup_test_env();
-
-        // Place bets: 300 on A, 700 on B
-        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, 300);
-        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, 700);
-
-        let (pool_a, pool_b, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
-        assert_eq!(pool_a, 300);
-        assert_eq!(pool_b, 700);
-        // odds_a = (300 * 10000) / 1000 = 3000
-        assert_eq!(odds_a, 3000);
-        assert_eq!(odds_b, 7000);
-    }
-
-    #[test]
-    fn test_get_pool_odds_equal_pools() {
-        let (env, bettor, _) = setup_test_env();
-
-        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, 500);
-        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, 500);
-
-        let (_, _, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
-        assert_eq!(odds_a, 5000);
-        assert_eq!(odds_b, 5000);
-    }
-
-    #[test]
-    fn test_get_pool_odds_one_side_only() {
-        let (env, bettor, _) = setup_test_env();
-
-        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, 1000);
-
-        let (_, _, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
-        assert_eq!(odds_a, 10000);
-        assert_eq!(odds_b, 0);
-    }
-
-    // ── get_bets_by_address ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_get_bets_by_address_empty_when_no_bets() {
-        let (env, _, _) = setup_test_env();
-        let bettor = Address::new(&env, &[99u8; 32]);
-        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
-        assert_eq!(bets.len(), 0);
-    }
-
-    #[test]
-    fn test_get_bets_by_address_returns_placed_bets() {
-        let (env, bettor, _) = setup_test_env();
-
-        let bet_id_1 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
-        let bet_id_2 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, TEST_MIN_BET * 2);
-
-        let bets = MarketContract::get_bets_by_address(env.clone(), bettor.clone());
-        assert_eq!(bets.len(), 2);
-
-        let bet_1 = bets.get(0).unwrap();
-        assert_eq!(bet_1.bet_id, bet_id_1);
-        assert_eq!(bet_1.amount, TEST_MIN_BET);
-        assert_eq!(bet_1.side, BetSide::FighterA);
-
-        let bet_2 = bets.get(1).unwrap();
-        assert_eq!(bet_2.bet_id, bet_id_2);
-        assert_eq!(bet_2.amount, TEST_MIN_BET * 2);
-        assert_eq!(bet_2.side, BetSide::FighterB);
-    }
-
-    #[test]
-    fn test_get_bets_by_address_returns_bets_for_specific_address() {
-        let (env, bettor_a, _) = setup_test_env();
-        let bettor_b = Address::new(&env, &[5u8; 32]);
-
-        MarketContract::place_bet(env.clone(), bettor_a.clone(), BetSide::FighterA, TEST_MIN_BET);
-        MarketContract::place_bet(env.clone(), bettor_b.clone(), BetSide::FighterB, TEST_MIN_BET);
-
-        let bets_a = MarketContract::get_bets_by_address(env.clone(), bettor_a);
-        assert_eq!(bets_a.len(), 1);
-        assert_eq!(bets_a.get(0).unwrap().side, BetSide::FighterA);
-
-        let bets_b = MarketContract::get_bets_by_address(env.clone(), bettor_b);
-        assert_eq!(bets_b.len(), 1);
-        assert_eq!(bets_b.get(0).unwrap().side, BetSide::FighterB);
-    }
-
-    // ── Full lifecycle ──────────────────────────────────────────────────────
-
-    fn resolve_market_via_storage(env: &Env, outcome: Outcome) {
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
-            .expect("market not initialized");
-        market.status = MarketStatus::Resolved;
-        market.outcome = Some(outcome);
-        market.resolved_at = env.ledger().timestamp();
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-    }
-
-    fn lock_market_via_storage(env: &Env) {
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
-            .expect("market not initialized");
-        market.status = MarketStatus::Locked;
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-    }
-
-    #[test]
-    fn test_full_lifecycle_single_bettor_wins() {
-        let (env, bettor, _) = setup_test_env();
-
-        // Place bet on FighterA
-        let bet_id = MarketContract::place_bet(
-            env.clone(),
-            bettor.clone(),
-            BetSide::FighterA,
-            TEST_MIN_BET,
-        );
-
-        // Verify pools
-        let (pool_a, pool_b, _, _) = MarketContract::get_pool_odds(env.clone());
-        assert_eq!(pool_a, TEST_MIN_BET);
-        assert_eq!(pool_b, 0);
-
-        // Lock market (simulate)
-        lock_market_via_storage(&env);
-
-        // Resolve with FighterA winning
-        resolve_market_via_storage(&env, Outcome::FighterA);
-
-        // Claim winnings
-        let payout = MarketContract::claim_winnings(
-            env.clone(),
-            bettor.clone(),
-            bet_id.clone(),
-        );
-
-        // Since bettor has 100% of winning pool, payout should be (100 * total_pool * (10000-fee)) / (100 * 10000)
-        let expected_payout = TEST_MIN_BET * (10000 - 200) / 10000;
-        assert_eq!(payout, expected_payout, "Payout should be total minus fee");
-
-        // Verify bet is tracked in address index
-        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
-        assert_eq!(bets.len(), 1);
-    }
-
-    #[test]
-    fn test_full_lifecycle_two_bettors_different_sides() {
-        let (env, bettor_a, _) = setup_test_env();
-        let bettor_b = Address::new(&env, &[5u8; 32]);
-
-        // Bettor A bets 300 on FighterA
-        MarketContract::place_bet(env.clone(), bettor_a.clone(), BetSide::FighterA, 300);
-        // Bettor B bets 700 on FighterB
-        MarketContract::place_bet(env.clone(), bettor_b.clone(), BetSide::FighterB, 700);
-
-        // Verify odds
-        let (_, _, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
-        assert_eq!(odds_a, 3000);
-        assert_eq!(odds_b, 7000);
-
-        // Lock and resolve with FighterA winning
-        lock_market_via_storage(&env);
-        resolve_market_via_storage(&env, Outcome::FighterA);
-
-        // Bettor A claims (winning pool = 300, bettor has all of it)
-        let payout_a = MarketContract::claim_winnings(
-            env.clone(),
-            bettor_a.clone(),
-            MarketContract::get_bets_by_address(env.clone(), bettor_a.clone()).get(0).unwrap().bet_id,
-        );
-        // Bettor A gets: (300 * 1000 * 9800) / (300 * 10000) = 980
-        assert_eq!(payout_a, 300 * 1000 * (10000 - 200) / (300 * 10000)); // = 980
-
-        // Bettor B tries to claim — should panic (losing side)
-        let bet_id_b = MarketContract::get_bets_by_address(env.clone(), bettor_b.clone()).get(0).unwrap().bet_id;
-        let result = std::panic::catch_unwind(|| {
-            MarketContract::claim_winnings(env.clone(), bettor_b.clone(), bet_id_b);
-        });
-        assert!(result.is_err(), "Losing bettor should not be able to claim");
-    }
-
-    #[test]
-    fn test_full_lifecycle_cancelled_market_refund() {
-        let (env, bettor, _) = setup_test_env();
-
-        let bet_id = MarketContract::place_bet(
-            env.clone(),
-            bettor.clone(),
-            BetSide::FighterA,
-            TEST_MIN_BET,
-        );
-
-        // Cancel market
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
-            .expect("market not initialized");
-        market.status = MarketStatus::Cancelled;
-        market.outcome = Some(Outcome::NoContest);
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        // Claim refund
-        let refund = MarketContract::claim_refund(
-            env.clone(),
-            bettor.clone(),
-            bet_id.clone(),
-        );
-        assert_eq!(refund, TEST_MIN_BET, "Full refund on cancellation");
-
-        // Verify bets index still works
-        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
-        assert_eq!(bets.len(), 1);
-    }
-
-    #[test]
-    fn test_get_market_info_returns_market() {
-        let (env, _, _) = setup_test_env();
-        let market: Market = MarketContract::get_market_info(env.clone());
-        assert_eq!(market.market_id, Bytes::from_slice(&env, &[2u8; 32]));
-        assert_eq!(market.fighter_a.name, String::from_str(&env, "Fighter A"));
-        assert_eq!(market.fighter_b.name, String::from_str(&env, "Fighter B"));
-        assert_eq!(market.status, MarketStatus::Open);
-        assert_eq!(market.pool_a, 0);
-        assert_eq!(market.pool_b, 0);
-        assert_eq!(market.total_pool, 0);
-    }
-
-    #[test]
-    fn test_get_bet_returns_bet() {
-        let (env, bettor, _) = setup_test_env();
-        let bet_id = MarketContract::place_bet(
-            env.clone(),
-            bettor.clone(),
-            BetSide::FighterA,
-            TEST_MIN_BET,
-        );
-        let bet: Bet = MarketContract::get_bet(env.clone(), bet_id.clone());
-        assert_eq!(bet.bet_id, bet_id);
-        assert_eq!(bet.bettor, bettor);
-        assert_eq!(bet.side, BetSide::FighterA);
-        assert_eq!(bet.amount, TEST_MIN_BET);
-    }
-
-    #[test]
-    fn test_get_bet_panics_if_not_found() {
-        let (env, _, _) = setup_test_env();
-        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
-        let result = std::panic::catch_unwind(|| {
-            MarketContract::get_bet(env.clone(), fake_id);
-        });
-        assert!(result.is_err(), "get_bet should panic for non-existent bet");
-    }
-
-    #[test]
-    fn test_multiple_bets_same_bettor_tracks_correctly() {
-        let (env, bettor, _) = setup_test_env();
-
-        let id1 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
-        let id2 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, TEST_MIN_BET * 2);
-        let id3 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET * 3);
-
-        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
-        assert_eq!(bets.len(), 3);
-        assert_eq!(bets.get(0).unwrap().bet_id, id1);
-        assert_eq!(bets.get(1).unwrap().bet_id, id2);
-        assert_eq!(bets.get(2).unwrap().bet_id, id3);
-
-        // Verify total pools
-        let market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-        assert_eq!(market.pool_a, TEST_MIN_BET + TEST_MIN_BET * 3);
-        assert_eq!(market.pool_b, TEST_MIN_BET * 2);
-    }
-
-    // ─── claim_refund() Tests (Issue #859) ─────────────────────────────────────
-
-    #[test]
-    fn test_claim_refund_cancelled_market_returns_full_amount() {
-        let (env, bettor, _) = setup_test_env();
-
-        // Place a bet
-        let bet_id = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
-
-        // Cancel the market
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-        market.status = MarketStatus::Cancelled;
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        // Claim refund
-        let refund = MarketContract::claim_refund(env.clone(), bettor.clone(), bet_id.clone());
-
-        // Verify full amount returned
-        assert_eq!(refund, TEST_MIN_BET);
-
-        // Verify claimed flag is set
-        let claimed: bool = env.storage().persistent()
-            .get(&DataKey::Claimed(bet_id))
-            .unwrap_or(false);
-        assert!(claimed);
-    }
-
-    #[test]
-    fn test_claim_refund_nocontest_outcome_returns_full_amount() {
-        let (env, bettor, _) = setup_test_env();
-
-        // Place a bet
-        let bet_id = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, TEST_MIN_BET * 2);
-
-        // Resolve market with NoContest (which transitions to Cancelled)
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-        market.status = MarketStatus::Resolved;
-        market.outcome = Some(Outcome::NoContest);
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        // Claim refund
-        let refund = MarketContract::claim_refund(env.clone(), bettor.clone(), bet_id.clone());
-
-        // Verify full amount returned (no fee deduction)
-        assert_eq!(refund, TEST_MIN_BET * 2);
-    }
-
-    #[test]
-    fn test_claim_refund_panic_on_duplicate_claim() {
-        let (env, bettor, _) = setup_test_env();
-
-        // Place a bet and cancel market
-        let bet_id = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-        market.status = MarketStatus::Cancelled;
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        // First claim succeeds
-        let _ = MarketContract::claim_refund(env.clone(), bettor.clone(), bet_id.clone());
-
-        // Second claim should panic
-        let result = std::panic::catch_unwind(|| {
-            MarketContract::claim_refund(env.clone(), bettor.clone(), bet_id);
-        });
-        assert!(result.is_err(), "second claim should panic");
-    }
-
-    #[test]
-    fn test_claim_refund_panic_if_market_resolved() {
-        let (env, bettor, _) = setup_test_env();
-
-        // Place a bet
-        let bet_id = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
-
-        // Resolve market (not Cancelled, not NoContest)
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-        market.status = MarketStatus::Resolved;
-        market.outcome = Some(Outcome::FighterA);
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        // Claim refund should panic
-        let result = std::panic::catch_unwind(|| {
-            MarketContract::claim_refund(env.clone(), bettor.clone(), bet_id);
-        });
-        assert!(result.is_err(), "claim_refund should panic for resolved market without NoContest");
-    }
-
-    #[test]
-    fn test_claim_refund_panic_if_not_bettor() {
-        let (env, bettor, _) = setup_test_env();
-        let other = Address::generate(&env);
-
-        // Place a bet
-        let bet_id = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
-
-        // Cancel market
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-        market.status = MarketStatus::Cancelled;
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        // Claim refund as different address should panic
-        let result = std::panic::catch_unwind(|| {
-            MarketContract::claim_refund(env.clone(), other, bet_id);
-        });
-        assert!(result.is_err(), "claim_refund should panic if not bet owner");
-    }
-
-    #[test]
-    fn test_claim_refund_emits_event() {
-        let (env, bettor, _) = setup_test_env();
-
-        // Place a bet
-        let bet_id = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
-
-        // Cancel market
-        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
-        market.status = MarketStatus::Cancelled;
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        // Clear previous events
-        let _ = env.events().all();
-
-        // Claim refund
-        MarketContract::claim_refund(env.clone(), bettor.clone(), bet_id.clone());
-
-        // Verify event was emitted
-        let events = env.events().all();
-        assert!(events.len() > 0, "RefundClaimed event should be emitted");
-        let (topic, _) = &events[events.len() - 1];
-        assert_eq!(*topic, vec![&env, &Symbol::new(&env, "RefundClaimed")]);
-    #[test]
-    fn test_overflow_safe_arithmetic_large_values() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, MarketContract);
+        let factory = env.register(MockFactory, (admin.clone(),));
+        let treasury = env.register(MockTreasury, ());
+        let contract_id = env.register(MarketContract, ());
         let client = MarketContractClient::new(&env, &contract_id);
-
-        let oracle = create_test_address(&env);
-        let factory = create_test_address(&env);
-        let fee_col = create_test_address(&env);
-        let fighter_a = make_fighter(&env, "Fury");
-        let fighter_b = make_fighter(&env, "Usyk");
-        let market_id = Bytes::from_array(&env, &[1u8; 32]);
+        let market_id = factory_market_id(&env, NONCE);
 
         client.initialize(
             &market_id,
-            &fighter_a,
-            &fighter_b,
-            &1000u64,
-            &500u64,
+            &fighter(&env, "Alpha"),
+            &fighter(&env, "Beta"),
+            &2_000u64,
+            &BETTING_ENDS_AT,
             &oracle,
             &factory,
             &200u32,
-            &fee_col,
+            &Address::generate(&env),
+            &86_400u64,
+            &treasury,
+            &Address::generate(&env),
         );
 
-        let bettor_a = create_test_address(&env);
-        let bettor_b = create_test_address(&env);
+        Ctx { env, client, admin, oracle, market_id }
+    }
 
-        let large_amount_a: i128 = 50_000_000_000_000i128;
-        let large_amount_b: i128 = 75_000_000_000_000i128;
+    fn set_time(env: &Env, ts: u64) {
+        env.ledger().with_mut(|li| li.timestamp = ts);
+    }
 
-        let bet_id_a = client.place_bet(&bettor_a, &BetSide::FighterA, &large_amount_a);
-        assert!(bet_id_a.len() > 0);
+    fn assert_last_event_name(env: &Env, name: &str) {
+        assert_eq!(event_count(env), 1, "expected exactly one event");
+        assert_eq!(last_event_name(env), Symbol::new(env, name));
+    }
 
-        let bet_id_b = client.place_bet(&bettor_b, &BetSide::FighterB, &large_amount_b);
-        assert!(bet_id_b.len() > 0);
+    fn is_snake_case(name: &str) -> bool {
+        !name.is_empty()
+            && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    }
 
-        let market = client.get_market_info();
-        assert_eq!(market.pool_a, large_amount_a);
-        assert_eq!(market.pool_b, large_amount_b);
-        let expected_total = large_amount_a.checked_add(large_amount_b).unwrap();
-        assert_eq!(market.total_pool, expected_total);
+    fn resolved_ctx(outcome: Outcome) -> (Ctx, Address, Bytes) {
+        let ctx = setup();
+        let bettor = Address::generate(&ctx.env);
+        let bet_id = ctx.client.place_bet(&bettor, &BetSide::FighterA, &500);
+        set_time(&ctx.env, BETTING_ENDS_AT);
+        ctx.client.lock_market(&ctx.oracle);
+        ctx.client.resolve_market(&ctx.oracle, &outcome);
+        (ctx, bettor, bet_id)
+    }
+
+    // ─── market_id topic ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_event_market_id_matches_factory_nonce() {
+        let ctx = setup();
+        assert_eq!(market_id_to_u64(&ctx.market_id), NONCE);
+        let bettor = Address::generate(&ctx.env);
+        ctx.client.place_bet(&bettor, &BetSide::FighterA, &500);
+        let (topics, data) = last_event(&ctx.env);
+        assert_eq!(parse_bet_placed_event(&ctx.env, &topics, &data).unwrap().market_id, NONCE);
+    }
+
+    // ─── Round trips per emitter ──────────────────────────────────────────────
+
+    #[test]
+    fn test_place_bet_emits_bet_placed() {
+        let ctx = setup();
+        let bettor = Address::generate(&ctx.env);
+        set_time(&ctx.env, 10);
+        let bet_id = ctx.client.place_bet(&bettor, &BetSide::FighterB, &750);
+
+        assert_last_event_name(&ctx.env, "bet_placed");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_bet_placed_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.bet.bet_id, bet_id);
+        assert_eq!(ev.bet.bettor, bettor);
+        assert_eq!(ev.bet.market_id, NONCE);
+        assert_eq!(ev.bet.side, shared::types::BetSide::FighterB);
+        assert_eq!(ev.bet.amount, 750);
+        assert_eq!(ev.bet.placed_at, 10);
+        assert!(!ev.bet.claimed);
     }
 
     #[test]
-    #[should_panic(expected = "pool_a overflow")]
-    fn test_pool_overflow_protection() {
-        let env = Env::default();
-        env.mock_all_auths();
+    fn test_lock_market_emits_market_locked() {
+        let ctx = setup();
+        set_time(&ctx.env, 400);
+        ctx.client.lock_market(&ctx.oracle);
 
-        let contract_id = env.register_contract(None, MarketContract);
-        let client = MarketContractClient::new(&env, &contract_id);
+        assert_last_event_name(&ctx.env, "market_locked");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_market_locked_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.locked_at, 400);
+    }
 
-        let oracle = create_test_address(&env);
-        let factory = create_test_address(&env);
-        let fee_col = create_test_address(&env);
-        let fighter_a = make_fighter(&env, "Fury");
-        let fighter_b = make_fighter(&env, "Usyk");
-        let market_id = Bytes::from_array(&env, &[1u8; 32]);
+    #[test]
+    fn test_resolve_market_emits_market_resolved() {
+        let ctx = setup();
+        set_time(&ctx.env, BETTING_ENDS_AT);
+        ctx.client.lock_market(&ctx.oracle);
+        set_time(&ctx.env, 2_500);
+        ctx.client.resolve_market(&ctx.oracle, &Outcome::FighterA);
 
-        client.initialize(
-            &market_id,
-            &fighter_a,
-            &fighter_b,
-            &1000u64,
-            &500u64,
-            &oracle,
-            &factory,
-            &200u32,
-            &fee_col,
-        );
+        assert_last_event_name(&ctx.env, "market_resolved");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_market_resolved_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.outcome, shared::types::Outcome::FighterA);
+        assert_eq!(ev.resolved_at, 2_500);
+    }
 
-        let bettor = create_test_address(&env);
-        let overflow_amount = i128::MAX;
+    #[test]
+    fn test_cancel_market_emits_market_cancelled() {
+        let ctx = setup();
+        ctx.client.cancel_market(&ctx.admin);
 
-        client.place_bet(&bettor, &BetSide::FighterA, &overflow_amount);
-        client.place_bet(&bettor, &BetSide::FighterA, &1i128);
+        assert_last_event_name(&ctx.env, "market_cancelled");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_market_cancelled_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.reason, String::from_str(&ctx.env, "cancelled_by_admin"));
+    }
+
+    #[test]
+    fn test_dispute_resolution_emits_resolution_disputed() {
+        let (ctx, bettor, _) = resolved_ctx(Outcome::FighterB);
+        let reason = Bytes::from_slice(&ctx.env, b"wrong winner");
+        ctx.client.dispute_resolution(&bettor, &reason);
+
+        assert_last_event_name(&ctx.env, "resolution_disputed");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_resolution_disputed_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.disputer, bettor);
+        assert_eq!(ev.reason, reason);
+    }
+
+    #[test]
+    fn test_resolve_dispute_emits_dispute_resolved() {
+        let (ctx, bettor, _) = resolved_ctx(Outcome::FighterB);
+        ctx.client.dispute_resolution(&bettor, &Bytes::from_slice(&ctx.env, b"x"));
+        ctx.client.resolve_dispute(&ctx.admin, &Outcome::FighterA);
+
+        assert_last_event_name(&ctx.env, "dispute_resolved");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_dispute_resolved_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.final_outcome, shared::types::Outcome::FighterA);
+    }
+
+    #[test]
+    fn test_claim_refund_emits_refund_claimed() {
+        let ctx = setup();
+        let bettor = Address::generate(&ctx.env);
+        let bet_id = ctx.client.place_bet(&bettor, &BetSide::FighterA, &600);
+        ctx.client.cancel_market(&ctx.admin);
+        ctx.client.claim_refund(&bettor, &bet_id);
+
+        assert_last_event_name(&ctx.env, "refund_claimed");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_refund_claimed_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.bettor, bettor);
+        assert_eq!(ev.bet_id, bet_id);
+        assert_eq!(ev.amount, 600);
+    }
+
+    #[test]
+    fn test_claim_winnings_emits_winnings_claimed() {
+        let (ctx, bettor, bet_id) = resolved_ctx(Outcome::FighterA);
+        let payout = ctx.client.claim_winnings(&bettor, &bet_id);
+
+        assert_last_event_name(&ctx.env, "winnings_claimed");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_winnings_claimed_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.receipt.bet_id, bet_id);
+        assert_eq!(ev.receipt.bettor, bettor);
+        assert_eq!(ev.receipt.payout, payout);
+    }
+
+    #[test]
+    fn test_finalize_resolution_emits_resolution_finalized() {
+        let (ctx, _, _) = resolved_ctx(Outcome::FighterA);
+        set_time(&ctx.env, BETTING_ENDS_AT + 86_401);
+        ctx.client.finalize_resolution(&None);
+
+        assert_last_event_name(&ctx.env, "resolution_finalized");
+        let (topics, data) = last_event(&ctx.env);
+        let ev = parse_resolution_finalized_event(&ctx.env, &topics, &data).unwrap();
+        assert_eq!(ev.market_id, NONCE);
+        assert_eq!(ev.finalized_at, BETTING_ENDS_AT + 86_401);
+    }
+
+    // ─── Topic casing ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_market_event_topics_are_snake_case() {
+        let (ctx, bettor, bet_id) = resolved_ctx(Outcome::FighterA);
+        let mut names: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+        let mut record = |env: &Env| names.push(last_event_name(env).to_string());
+
+        record(&ctx.env); // market_resolved
+        ctx.client.claim_winnings(&bettor, &bet_id);
+        record(&ctx.env);
+        ctx.client.dispute_resolution(&bettor, &Bytes::from_slice(&ctx.env, b"x"));
+        record(&ctx.env);
+        ctx.client.resolve_dispute(&ctx.admin, &Outcome::FighterA);
+        record(&ctx.env);
+
+        let other = setup();
+        let b = Address::generate(&other.env);
+        let id = other.client.place_bet(&b, &BetSide::FighterA, &500);
+        record(&other.env);
+        other.client.lock_market(&other.oracle);
+        record(&other.env);
+        other.client.cancel_market(&other.admin);
+        record(&other.env);
+        other.client.claim_refund(&b, &id);
+        record(&other.env);
+
+        assert_eq!(names.len(), 8);
+        for name in names.iter() {
+            assert!(is_snake_case(name), "topic `{}` is not snake_case", name);
+        }
     }
 }
