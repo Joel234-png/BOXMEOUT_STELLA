@@ -1,34 +1,29 @@
-use soroban_sdk::{contracttype, Address, Bytes, String};
+//! Market contract types.
+//!
+//! Types shared across contracts (enums, `Fighter`, `Bet`, `ClaimReceipt`,
+//! `ProtocolConfig`) are re-exported from `shared::types` so every contract
+//! encodes them with identical XDR. Only types that exist solely in the Market
+//! contract are defined here:
+//!
+//! - `Market`: the full per-instance market state. It is a superset of
+//!   `shared::types::Market` (adds `resolved_at`, `dispute_window_sec`,
+//!   `treasury`, `bet_token`, and stores the outcome as `Option<Outcome>`),
+//!   and is persisted only by the Market contract itself.
+//! - `SettledOutcome`, `MarketResolved`, `WinningsClaimed`: market-local
+//!   settlement / event payloads.
 
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum MarketStatus {
-    Open,
-    Locked,
-    Resolved,
-    Cancelled,
-    Disputed,
-}
+use soroban_sdk::{contracttype, Address, Bytes};
 
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum Outcome {
-    FighterA,
-    FighterB,
-    Draw,
-    NoContest,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum BetSide {
-    FighterA,
-    FighterB,
-}
+pub use shared::types::{
+    Bet, BetSide, ClaimReceipt, Fighter, MarketStatus, Outcome, ProtocolConfig,
+};
 
 /// Post-resolution outcome stored in Market. Pending until the market resolves.
+///
+/// Used instead of `Option<Outcome>`, which `#[contracttype]` structs cannot
+/// serialise for unit enums.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettledOutcome {
     Pending,
     FighterA,
@@ -37,15 +32,7 @@ pub enum SettledOutcome {
     NoContest,
 }
 
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Fighter {
-    pub name: String,
-    pub record: String,
-    pub nationality: String,
-    pub weight_class: String,
-}
-
+/// Full market state held by a deployed Market contract instance (market-only).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Market {
@@ -62,7 +49,7 @@ pub struct Market {
     pub total_pool: i128,
     pub protocol_fee_bp: u32,
     pub oracle_address: Address,
-    pub outcome: Option<Outcome>,
+    pub outcome: SettledOutcome,
     pub fee_collector_address: Address,
     pub resolved_at: u64,
     pub dispute_window_sec: u64,
@@ -71,40 +58,7 @@ pub struct Market {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]
-pub struct Bet {
-    pub bet_id: Bytes,
-    pub market_id: Bytes,
-    pub bettor: Address,
-    pub side: BetSide,
-    pub amount: i128,
-    pub placed_at: u64,
-    pub claimed: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct ClaimReceipt {
-    pub bet_id: Bytes,
-    pub bettor: Address,
-    pub payout: i128,
-    pub claimed_at: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct ProtocolConfig {
-    pub admin: Address,
-    pub fee_collector: Address,
-    pub default_fee_bp: u32,
-    pub min_bet_amount: i128,
-    pub max_bet_amount: i128,
-    pub dispute_window_sec: u64,
-    pub paused: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MarketResolved {
     pub market_id: Bytes,
     pub outcome: Outcome,
@@ -119,4 +73,29 @@ pub struct WinningsClaimed {
     pub payout: i128,
     pub fee_paid: i128,
     pub claimed_at: u64,
+}
+
+// ─── Conversions to shared event types ────────────────────────────────────────
+// The Market contract's enums are symbol-encoded while shared::types uses
+// integer discriminants, so values are converted explicitly before being
+// handed to shared::events.
+
+impl From<Outcome> for shared::types::Outcome {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::FighterA => shared::types::Outcome::FighterA,
+            Outcome::FighterB => shared::types::Outcome::FighterB,
+            Outcome::Draw => shared::types::Outcome::Draw,
+            Outcome::NoContest => shared::types::Outcome::NoContest,
+        }
+    }
+}
+
+impl From<BetSide> for shared::types::BetSide {
+    fn from(side: BetSide) -> Self {
+        match side {
+            BetSide::FighterA => shared::types::BetSide::FighterA,
+            BetSide::FighterB => shared::types::BetSide::FighterB,
+        }
+    }
 }
