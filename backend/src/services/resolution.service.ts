@@ -357,6 +357,46 @@ async function autoFinalizeExpiredWindows(): Promise<void> {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /** Interval handle so the jobs can be stopped in tests. */
-let
+let lockJobInterval: ReturnType<typeof setInterval> | null = null;
+let finalizeJobInterval: ReturnType<typeof setInterval> | null = null;
 
-/* … truncated 1363 chars — edit only what you need near the top … */
+/**
+ * Starts both cron jobs. Both run every 60 seconds.
+ * Safe to call multiple times — existing intervals are cleared first.
+ */
+export function startResolutionService(): void {
+  if (lockJobInterval) clearInterval(lockJobInterval);
+  if (finalizeJobInterval) clearInterval(finalizeJobInterval);
+
+  lockJobInterval = setInterval(() => {
+    enforceMarketLocks().catch((err) =>
+      logger.error({ err }, "enforceMarketLocks: unexpected error")
+    );
+  }, 60_000);
+
+  finalizeJobInterval = setInterval(() => {
+    autoFinalizeExpiredWindows().catch((err) =>
+      logger.error({ err }, "autoFinalizeExpiredWindows: unexpected error")
+    );
+  }, 60_000);
+
+  logger.info("ResolutionService started (enforceMarketLocks + autoFinalizeExpiredWindows)");
+}
+
+/**
+ * Stops both cron jobs. Useful in tests and graceful shutdown.
+ */
+export function stopResolutionService(): void {
+  if (lockJobInterval) {
+    clearInterval(lockJobInterval);
+    lockJobInterval = null;
+  }
+  if (finalizeJobInterval) {
+    clearInterval(finalizeJobInterval);
+    finalizeJobInterval = null;
+  }
+  logger.info("ResolutionService stopped");
+}
+
+// Export internal functions for unit testing
+export { enforceMarketLocks, autoFinalizeExpiredWindows };
