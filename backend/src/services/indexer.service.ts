@@ -7,6 +7,7 @@ import * as betService from "./bet.service";
 import { markBetClaimed } from "./bet.service";
 import { publishMarketEvent } from "../events/marketEvents";
 import { indexerLedgerLag } from "../metrics";
+import { db } from "../db";
 
 const logger = pino({ name: "indexer" });
 
