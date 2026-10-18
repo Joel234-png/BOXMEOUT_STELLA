@@ -396,6 +396,200 @@ export async function raiseDispute(
 ): Promise<Dispute> {
   const market = await prisma.market.findUnique({ where: { id: market_id } });
   if (!market || market.status !== "Resolved") {
-    throw new Error("Market must be 
+    throw new Error("Market must be in Resolved status to raise a dispute");
+  }
 
-/* … truncated 12781 chars — edit only what you need near the top … */
+  const dispute = await prisma.dispute.create({
+    data: { marketId: market_id, raisedBy: bettor, reason },
+  });
+
+  const server = new SorobanRpc.Server(RPC_URL);
+  const keypair = Keypair.fromSecret(ADMIN_SECRET);
+  const account = await server.getAccount(keypair.publicKey());
+  const contract = new Contract(market.contractAddress);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(contract.call("raise_dispute", nativeToScVal(dispute.id, { type: "string" })))
+    .setTimeout(30)
+    .build();
+
+  const prepared = await server.prepareTransaction(tx);
+  prepared.sign(keypair);
+  await server.sendTransaction(prepared);
+
+  await prisma.$transaction([
+    prisma.market.update({ where: { id: market_id }, data: { status: "Disputed" } }),
+    prisma.adminLog.create({
+      data: { action: "raiseDispute", actor: bettor, target: market_id, metadata: { disputeId: dispute.id, reason } },
+    }),
+  ]);
+
+  // Admin alert: surfaced through structured logs for the on-call admin.
+  logger.warn({ marketId: market_id, disputeId: dispute.id, bettor }, "Dispute raised; admin review required");
+
+  return dispute;
+}
+
+/**
+ * Admin resolves a dispute with a final outcome (may override oracle).
+ * Calls resolve_dispute() on-chain and updates DB dispute record.
+ */
+export async function resolveDispute(
+  dispute_id: string,
+  override_outcome: Outcome,
+  admin: string
+): Promise<void> {
+  const dispute = await prisma.dispute.findUniqueOrThrow({ where: { id: dispute_id } });
+  const market = await prisma.market.findUniqueOrThrow({ where: { id: dispute.marketId } });
+
+  const server = new SorobanRpc.Server(RPC_URL);
+  const keypair = Keypair.fromSecret(ADMIN_SECRET);
+  const account = await server.getAccount(keypair.publicKey());
+  const contract = new Contract(market.contractAddress);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(contract.call(
+      "resolve_dispute",
+      nativeToScVal(dispute_id, { type: "string" }),
+      nativeToScVal(override_outcome, { type: "symbol" }),
+    ))
+    .setTimeout(30)
+    .build();
+
+  const prepared = await server.prepareTransaction(tx);
+  prepared.sign(keypair);
+  await server.sendTransaction(prepared);
+
+  await prisma.$transaction([
+    prisma.dispute.update({
+      where: { id: dispute_id },
+      data: { resolvedAt: new Date(), resolution: override_outcome },
+    }),
+    prisma.market.update({
+      where: { id: dispute.marketId },
+      data: { status: "Resolved", outcome: override_outcome },
+    }),
+    prisma.adminLog.create({
+      data: { action: "resolveDispute", actor: admin, target: dispute.marketId, metadata: { disputeId: dispute_id, override_outcome } },
+    }),
+  ]);
+}
+
+// ─── Oracle Address Management (Issue #455) ────────────────────────────────
+
+/**
+ * Get all registered oracles with their details.
+ */
+export async function getAllOracles() {
+  return prisma.oracle.findMany({
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
+/**
+ * Get a single oracle by ID.
+ */
+export async function getOracleById(id: string) {
+  return prisma.oracle.findUnique({
+    where: { id },
+  });
+}
+
+/**
+ * Create a new oracle entry.
+ */
+export async function createOracle(address: string, name: string) {
+  return prisma.oracle.create({
+    data: {
+      address,
+      name,
+      active: true,
+    },
+  });
+}
+
+/**
+ * Update oracle name or active status.
+ */
+export async function updateOracle(id: string, data: { name?: string; active?: boolean }) {
+  return prisma.oracle.update({
+    where: { id },
+    data,
+  });
+}
+
+/**
+ * Deactivate an oracle (soft delete by setting active to false).
+ */
+export async function deleteOracle(id: string) {
+  return prisma.oracle.update({
+    where: { id },
+    data: { active: false },
+  });
+}
+
+
+// ─── B-22 / #1080 ──────────────────────────────────────────────────────────
+
+/**
+ * Custom error thrown when a submitter is not the authorized oracle for a market.
+ * Carries the market ID and both addresses so callers can log or surface them.
+ */
+export class OracleAuthorizationError extends Error {
+  constructor(
+    public readonly marketId: string,
+    public readonly expected: string,
+    public readonly actual: string,
+  ) {
+    super(
+      `Oracle authorization failed for market ${marketId}: ` +
+        `expected ${expected}, got ${actual}`,
+    );
+    this.name = "OracleAuthorizationError";
+  }
+}
+
+/**
+ * Confirms that `submitter` is the configured oracle for `market_id`.
+ *
+ * Resolution order:
+ *   1. Look up the market's `oracleAddress` column.
+ *   2. If the address matches `submitter`, authorization is granted.
+ *   3. As a fallback, check whether `submitter` is a registered, active entry
+ *      in the `Oracle` table (for globally-whitelisted oracles).
+ *
+ * The function is fully unit-testable without a live database or Stellar node:
+ * pass a mock PrismaClient via the optional `db` parameter.
+ *
+ * @param market_id  - The BOXMEOUT market UUID to authorize against.
+ * @param submitter  - The Stellar public key (G…) or identifier of the caller.
+ * @param db         - Optional PrismaClient for dependency injection in tests.
+ * @throws {Error}                   If the market does not exist.
+ * @throws {OracleAuthorizationError} If `submitter` is not the market's oracle.
+ */
+export async function verifyOracleAuthorization(
+  market_id: string,
+  submitter: string,
+  db: PrismaClient = prisma,
+): Promise<void> {
+  const market = await db.market.findUnique({ where: { id: market_id } });
+  if (!market) {
+    throw new Error(`Market not found: ${market_id}`);
+  }
+
+  // Direct address match — the most common path.
+  if (market.oracleAddress === submitter) {
+    return;
+  }
+
+  // Fallback: submitter is a globally registered, active oracle.
+  const registeredOracle = await db.oracle.findFirst({
+    where: { address: submitter, active: true },
+  });
+  if (registeredOracle) {
+    return;
+  }
+
+  throw new OracleAuthorizationError(market_id, market.oracleAddress, submitter);
+}
+
