@@ -20,7 +20,7 @@ export function createApp(): express.Application {
   const app = express();
 
   // B-58: trust proxy so req.ip reflects the real client behind a load balancer
-  app.set("trust proxy", config.trustProxy);
+  app.set("trust proxy", config.TRUST_PROXY);
 
   app.set("json replacer", (_key: string, value: unknown) =>
     typeof value === "bigint" ? value.toString() : value
