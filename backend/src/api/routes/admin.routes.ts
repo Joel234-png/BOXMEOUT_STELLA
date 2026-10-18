@@ -1,9 +1,12 @@
 import { Router } from "express";
 import {
   getPendingResolutionsHandler,
-  resolveMarketHandler,
   resolveDisputeHandler,
 } from "../controllers/market.controller";
+import {
+  resolveMarketByIdHandler,
+  resolveMarketHandler,
+} from "../controllers/marketResolution.controller";
 import {
   getAllOraclesHandler,
   createOracleHandler,
@@ -51,8 +54,12 @@ const oracleSubmissionLimiter = rateLimitMiddleware({
 
 // Market management
 router.get("/markets/pending", getPendingResolutionsHandler);
-router.post("/markets/resolve", marketResolutionLimiter, resolveMarketHandler);
+// Registered before "/markets/:marketId/resolve" so "dispute" is not captured as a market id.
 router.post("/markets/dispute/resolve", marketResolutionLimiter, resolveDisputeHandler);
+// #1393: market id in the path, outcome in the body.
+router.post("/markets/:marketId/resolve", marketResolutionLimiter, resolveMarketByIdHandler);
+// #1393: deprecated alias, kept for existing callers. Use /markets/:marketId/resolve.
+router.post("/markets/resolve", marketResolutionLimiter, resolveMarketHandler);
 
 // Oracle address management (Issue #455)
 router.get("/oracles", getAllOraclesHandler);

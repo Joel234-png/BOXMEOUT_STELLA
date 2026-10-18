@@ -575,10 +575,69 @@
         }
       }
     },
+    "/api/admin/markets/{marketId}/resolve": {
+      "post": {
+        "tags": ["Admin"],
+        "summary": "Queue on-chain resolution of a market with the given outcome",
+        "security": [{ "AdminKey": [] }],
+        "parameters": [
+          { "name": "marketId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["outcome"],
+                "properties": {
+                  "outcome": {
+                    "type": "string",
+                    "enum": ["FighterA", "FighterB", "Draw", "NoContest"],
+                    "example": "FighterA"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Resolution queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "marketId": { "type": "string" },
+                    "outcome": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Outcome is missing or not a known value",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "401": {
+            "description": "Missing or invalid X-Admin-Key",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "Market not found",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
     "/api/admin/markets/resolve": {
       "post": {
         "tags": ["Admin"],
-        "summary": "Confirm oracle result and trigger on-chain resolution",
+        "deprecated": true,
+        "summary": "Deprecated: use POST /api/admin/markets/{marketId}/resolve",
+        "description": "Kept for existing callers. Responses include a `Deprecation: true` header and a `Link` header pointing at the successor route.",
         "security": [{ "AdminKey": [] }],
         "requestBody": {
           "required": true,
@@ -586,25 +645,26 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["oracle_result_id"],
+                "required": ["outcome"],
                 "properties": {
-                  "oracle_result_id": { "type": "integer", "example": 42 }
+                  "market_id": { "type": "string", "description": "Also accepted as marketId" },
+                  "outcome": {
+                    "type": "string",
+                    "enum": ["FighterA", "FighterB", "Draw", "NoContest"]
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": {
-            "description": "User profile",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/User" }
-              }
-            }
+          "202": { "description": "Resolution queued" },
+          "400": {
+            "description": "market_id and outcome are required",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           },
-          "404": {
-            "description": "User not found",
+          "401": {
+            "description": "Missing or invalid X-Admin-Key",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           }
         }

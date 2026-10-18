@@ -210,47 +210,12 @@ export async function getMarketBetsHandler(req: Request, res: Response): Promise
 }
 
 /**
- * POST /api/admin/markets/resolve
- * Body: { oracle_result_id: number }
- * Admin-protected. Confirms an oracle result and triggers on-chain market resolution.
- */
-export async function resolveMarketHandler(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  try {
-    const { market_id, marketId, outcome, oracle_result_id, source, reporter } = req.body;
-    const targetMarketId = market_id || marketId;
-
-    if (oracle_result_id === undefined || oracle_result_id === null) {
-      res
-        .status(400)
-        .json({ error: "oracle_result_id is required", code: "VALIDATION_ERROR" });
-      return;
-    }
-
-    const id = Number(oracle_result_id);
-    if (!Number.isInteger(id) || id <= 0) {
-      res.status(400).json({
-        error: "oracle_result_id must be a positive integer",
-        code: "VALIDATION_ERROR",
-      });
-      return;
-    }
-
-    res.status(400).json({ error: "market_id (or marketId) and outcome required", code: "VALIDATION_ERROR" });
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
  * POST /api/admin/markets/dispute/resolve
  */
 export async function resolveDisputeHandler(
   req: Request,
-  res: Response
+  res: Response,
+  next: NextFunction
 ): Promise<void> {
   try {
     const { dispute_id, disputeId, outcome, notes, decisionNotes } = req.body;
@@ -274,14 +239,9 @@ export async function resolveDisputeHandler(
 
     const admin = (req as any).user?.id || (req as any).admin || "admin";
 
-    const result = await ResolutionService.handleDispute({
-      disputeId: String(targetDisputeId),
-      outcome,
-      admin,
-      notes: String(notesText),
-    });
+    await oracleService.resolveDispute(String(targetDisputeId), outcome, admin);
 
-    res.status(200).json({ success: true, status: "ok", data: result });
+    res.status(200).json({ success: true, status: "ok" });
   } catch (err) {
     next(err);
   }
