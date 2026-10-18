@@ -4,6 +4,7 @@ import { httpLogger } from "./logger";
 import { config } from "./config";
 import { auditLogMiddleware } from "./api/middleware/audit-log.middleware";
 import { errorHandlerMiddleware } from "./api/middleware/errorHandler.middleware";
+import { notFoundMiddleware } from "./api/middleware/notFound.middleware";
 import { requestIdMiddleware } from "./api/middleware/requestId.middleware";
 import { metricsRouter, httpRequestDuration } from "./metrics";
 import marketRoutes from "./api/routes/market.routes";
@@ -79,6 +80,8 @@ export function createApp(): express.Application {
     app.use("/docs", docsRoutes);
   }
 
+  // #1391: JSON 404 for anything no route matched. Must sit before the error handler.
+  app.use(notFoundMiddleware);
   app.use(errorHandlerMiddleware);
 
   return app;
