@@ -234,9 +234,10 @@ Returns all bets placed on a market.
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| GET | `/api/oracle/feeds` | List available oracle price feeds. |
-| GET | `/api/oracle/feeds/:symbol` | Fetch the latest value for a feed symbol. |
-| POST | `/api/oracle/resolve` | Resolve a market using an oracle value. Requires authentication. |
+| POST | `/api/oracle/submit` | Submit a fight result from an oracle. Requires `X-Oracle-Key`. |
+| GET | `/api/oracle/results` | List oracle results. Requires `X-Admin-Key`. |
+
+Oracle record management (list, create, update, delete) is admin-only and lives under `/api/admin/oracles`. The unauthenticated `/api/oracle` CRUD routes were removed (B-87); requests to them return `404`.
 
 ## Search
 
