@@ -1,7 +1,8 @@
-import express, { Request, Response, NextFunction } from "express";
+import express from "express";
 import cors from "cors";
 import { httpLogger } from "./logger";
 import { config } from "./config";
+import { requestTimeoutMiddleware } from "./lib/timeout";
 import { auditLogMiddleware } from "./api/middleware/audit-log.middleware";
 import { errorHandlerMiddleware } from "./api/middleware/errorHandler.middleware";
 import { requestIdMiddleware } from "./api/middleware/requestId.middleware";
@@ -37,6 +38,9 @@ export function createApp(): express.Application {
   // B-59: attach / echo X-Request-Id before any logging or routing
   app.use(requestIdMiddleware);
 
+  // B-102: answer 503 when a non-SSE request exceeds the API deadline
+  app.use(requestTimeoutMiddleware(config.API_REQUEST_TIMEOUT_MS));
+
   // B-57: cap JSON body size to mitigate oversized-payload abuse
   app.use(express.json({ limit: "100kb" }));
   app.use(httpLogger);
@@ -70,9 +74,6 @@ export function createApp(): express.Application {
 
   // #1221: Mount oracle routes (X-Oracle-Key auth on submit, X-Admin-Key on results).
   app.use("/api/oracle", oracleRoutes);
-
-  // #1249: Mount leaderboard routes (rank bettors by realised profit / win rate).
-  app.use("/api/leaderboard", leaderboardRoutes);
 
   // B-37: Swagger UI — dev mode only (Issue #1095)
   if (process.env.NODE_ENV !== "production") {

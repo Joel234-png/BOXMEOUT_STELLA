@@ -1,5 +1,7 @@
 import { PrismaClient } from "@prisma/client";
+import { config } from "./config";
 import { logger } from "./logger";
+import { withTimeout } from "./lib/timeout";
 
 // Singleton guard: in development, ts-node-dev hot-reloads modules which would
 // create a new PrismaClient on every reload, exhausting the connection pool.
@@ -34,7 +36,24 @@ function createPrismaClient(): PrismaClient {
     logger.error({ target: e.target }, "prisma error");
   });
 
-  return client;
+  // B-102: every query gets an upper bound so a stuck database call cannot hold
+  // a request open indefinitely. The query itself keeps running in the engine;
+  // only the caller stops waiting for it.
+  const timed = client.$extends({
+    query: {
+      $allOperations({ model, operation, args, query }) {
+        return withTimeout(
+          query(args),
+          config.DB_QUERY_TIMEOUT_MS,
+          `prisma ${model ?? "raw"}.${operation}`,
+        );
+      },
+    },
+  });
+
+  // The extended client exposes the same API; the cast keeps existing
+  // `PrismaClient` type annotations (including transaction clients) valid.
+  return timed as unknown as PrismaClient;
 }
 
 export const db: PrismaClient = globalThis.__prisma ?? createPrismaClient();

@@ -4,6 +4,7 @@ import { createApp } from "./app";
 import { logger } from "./logger";
 import { db } from "./db";
 import { redis } from "./lib/redis";
+import { applyServerTimeouts } from "./lib/timeout";
 import {
   startResolutionService,
   stopResolutionService,
@@ -25,6 +26,13 @@ const server = app.listen(PORT, () => {
   startRetentionService().catch((err) =>
     logger.error({ err }, "failed to start retention service"),
   );
+});
+
+// B-102: explicit header, request and keep-alive limits on the HTTP server
+applyServerTimeouts(server, {
+  keepAliveTimeoutMs: config.SERVER_KEEP_ALIVE_TIMEOUT_MS,
+  headersTimeoutMs: config.SERVER_HEADERS_TIMEOUT_MS,
+  requestTimeoutMs: config.SERVER_REQUEST_TIMEOUT_MS,
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
