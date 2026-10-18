@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "crypto";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
+import { fail } from "../response";
 
 export interface ApiKeyAuthOptions {
   /** Request header that carries the key, e.g. `x-admin-key`. Case-insensitive. */
@@ -23,7 +24,7 @@ export function apiKeyAuth({ header, getKey }: ApiKeyAuthOptions): RequestHandle
     const expected = getKey() ?? "";
 
     if (typeof provided !== "string" || !provided || !expected || !keysMatch(provided, expected)) {
-      res.status(401).json({ error: "Unauthorized", code: "UNAUTHORIZED" });
+      fail(res, 401, "UNAUTHORIZED", "Unauthorized");
       return;
     }
 

@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
 import { logger } from "../../logger";
 import { AppError } from "../../errors";
+import { fail } from "../response";
 
 /**
  * Centralized error-to-HTTP mapping. Must be registered last, after all routes.
@@ -35,9 +36,7 @@ export function errorHandlerMiddleware(
   );
 
   if (err instanceof ZodError) {
-    res.status(400).json({
-      error: "Validation failed",
-      code: "VALIDATION_ERROR",
+    fail(res, 400, "VALIDATION_ERROR", "Validation failed", {
       details: err.flatten(),
       requestId,
     });
@@ -45,14 +44,14 @@ export function errorHandlerMiddleware(
   }
 
   if (err instanceof AppError) {
-    res.status(err.statusCode).json({ error: err.message, code: err.code, requestId });
+    fail(res, err.statusCode, err.code, err.message, { requestId });
     return;
   }
 
   if (err instanceof Error && err.name === "OracleAuthorizationError") {
-    res.status(403).json({ error: err.message, code: "FORBIDDEN", requestId });
+    fail(res, 403, "FORBIDDEN", err.message, { requestId });
     return;
   }
 
-  res.status(500).json({ error: "Internal server error", code: "INTERNAL_ERROR", requestId });
+  fail(res, 500, "INTERNAL_ERROR", "Internal server error", { requestId });
 }

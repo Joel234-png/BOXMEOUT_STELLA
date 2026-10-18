@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import * as userService from "../../services/user.service";
+import { ok, fail } from "../response";
 
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
@@ -15,13 +16,13 @@ export async function getUserHandler(req: Request, res: Response): Promise<void>
     const user = await userService.getUserByAddress(address);
 
     if (!user) {
-      res.status(404).json({ error: "User not found", code: "NOT_FOUND" });
+      fail(res, 404, "NOT_FOUND", "User not found");
       return;
     }
 
-    res.status(200).json({ user });
+    ok(res, user);
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch user", code: "INTERNAL_ERROR" });
+    fail(res, 500, "INTERNAL_ERROR", "Failed to fetch user");
   }
 }
 
@@ -36,9 +37,9 @@ export async function updateUserHandler(req: Request, res: Response): Promise<vo
     const { displayName, avatarUrl } = req.body;
 
     const user = await userService.updateUser(address, { displayName, avatarUrl });
-    res.status(200).json({ user });
+    ok(res, user);
   } catch (error) {
-    res.status(500).json({ error: "Failed to update user", code: "INTERNAL_ERROR" });
+    fail(res, 500, "INTERNAL_ERROR", "Failed to update user");
   }
 }
 
@@ -62,8 +63,8 @@ export async function getUserBetsHandler(req: Request, res: Response): Promise<v
       limit,
     });
 
-    res.status(200).json({ bets, nextCursor });
+    ok(res, bets, { meta: { nextCursor } });
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch user bets", code: "INTERNAL_ERROR" });
+    fail(res, 500, "INTERNAL_ERROR", "Failed to fetch user bets");
   }
 }

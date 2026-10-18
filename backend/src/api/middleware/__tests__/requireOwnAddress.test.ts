@@ -30,7 +30,7 @@ describe("requireOwnAddress", () => {
   it("returns 403 FORBIDDEN when the authenticated wallet is a different address", async () => {
     const res = await request(buildApp(OTHER)).put(`/api/users/${OWNER}`);
     expect(res.status).toBe(403);
-    expect(res.body).toEqual({ error: "Wallet does not own this address", code: "FORBIDDEN" });
+    expect(res.body).toEqual({ error: { code: "FORBIDDEN", message: "Wallet does not own this address" } });
   });
 
   it("returns 403 when no wallet was authenticated", async () => {

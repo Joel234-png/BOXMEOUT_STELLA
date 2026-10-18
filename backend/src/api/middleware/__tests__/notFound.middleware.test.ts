@@ -23,13 +23,13 @@ describe("notFoundMiddleware", () => {
     const res = await request(buildApp()).get("/api/does-not-exist");
     expect(res.status).toBe(404);
     expect(res.headers["content-type"]).toMatch(/application\/json/);
-    expect(res.body).toEqual({ error: "Not found", code: "NOT_FOUND" });
+    expect(res.body).toEqual({ error: { code: "NOT_FOUND", message: "Not found" } });
   });
 
   it("returns a JSON 404 for an unknown method on a known path", async () => {
     const res = await request(buildApp()).post("/api/known").send({});
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: "Not found", code: "NOT_FOUND" });
+    expect(res.body).toEqual({ error: { code: "NOT_FOUND", message: "Not found" } });
   });
 
   it("does not swallow responses from matched routes", async () => {
@@ -41,6 +41,6 @@ describe("notFoundMiddleware", () => {
   it("still routes thrown errors to the error handler", async () => {
     const res = await request(buildApp()).get("/api/boom");
     expect(res.status).toBe(500);
-    expect(res.body).toMatchObject({ code: "INTERNAL_ERROR" });
+    expect(res.body).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
   });
 });

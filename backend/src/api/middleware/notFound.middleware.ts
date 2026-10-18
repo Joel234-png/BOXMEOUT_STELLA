@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { fail } from "../response";
 
 /**
  * Catch-all for requests that no route handled, including unknown methods on
@@ -8,5 +9,5 @@ import type { Request, Response } from "express";
  * Returns 404 { error, code: "NOT_FOUND" }.
  */
 export function notFoundMiddleware(_req: Request, res: Response): void {
-  res.status(404).json({ error: "Not found", code: "NOT_FOUND" });
+  fail(res, 404, "NOT_FOUND", "Not found");
 }

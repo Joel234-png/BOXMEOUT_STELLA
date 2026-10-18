@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import type { Outcome } from "@prisma/client";
 import { db } from "../../db";
 import * as oracleService from "../../services/oracle.service";
+import { ok, fail } from "../response";
 
 const OUTCOMES: readonly Outcome[] = ["FighterA", "FighterB", "Draw", "NoContest"];
 
@@ -22,12 +23,12 @@ async function queueMarketResolution(
   const market = await db.market.findUnique({ where: { id: marketId }, select: { id: true } });
 
   if (!market) {
-    res.status(404).json({ error: "Market not found", code: "NOT_FOUND" });
+    fail(res, 404, "NOT_FOUND", "Market not found");
     return;
   }
 
   await oracleService.enqueueResolution(marketId, outcome);
-  res.status(202).json({ success: true, marketId, outcome });
+  ok(res, { success: true, marketId, outcome }, { status: 202 });
 }
 
 /**
@@ -44,10 +45,7 @@ export async function resolveMarketByIdHandler(
     const outcome = parseOutcome(req.body?.outcome);
 
     if (!outcome) {
-      res.status(400).json({
-        error: "outcome must be one of FighterA, FighterB, Draw, NoContest",
-        code: "VALIDATION_ERROR",
-      });
+      fail(res, 400, "VALIDATION_ERROR", "outcome must be one of FighterA, FighterB, Draw, NoContest");
       return;
     }
 
@@ -78,10 +76,7 @@ export async function resolveMarketHandler(
     const parsedOutcome = parseOutcome(outcome);
 
     if (!targetMarketId || !parsedOutcome) {
-      res.status(400).json({
-        error: "market_id (or marketId) and outcome required",
-        code: "VALIDATION_ERROR",
-      });
+      fail(res, 400, "VALIDATION_ERROR", "market_id (or marketId) and outcome required");
       return;
     }
 

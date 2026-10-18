@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
+import { fail } from "../response";
 
 /**
  * Must run after walletAuthMiddleware. Rejects the request unless the wallet
@@ -11,7 +12,7 @@ export function requireOwnAddress(req: Request, res: Response, next: NextFunctio
   const walletAddress = (req as Request & { walletAddress?: string }).walletAddress;
 
   if (!walletAddress || walletAddress !== req.params.address) {
-    res.status(403).json({ error: "Wallet does not own this address", code: "FORBIDDEN" });
+    fail(res, 403, "FORBIDDEN", "Wallet does not own this address");
     return;
   }
 

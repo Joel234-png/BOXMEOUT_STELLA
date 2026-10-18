@@ -7,6 +7,7 @@ import {
   getLeaderboardHandler,
 } from "../controllers/bet.controller";
 import { validateAddressParam } from "../middleware/validate";
+import { fail } from "../response";
 
 const payoutEstimateLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -14,11 +15,7 @@ const payoutEstimateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: (_req, res) => {
-    res.status(429).json({
-      error: "Too many requests",
-      code: "RATE_LIMITED",
-      retryAfter: 60,
-    });
+    fail(res, 429, "RATE_LIMITED", "Too many requests", { details: { retryAfter: 60 } });
   },
 });
 

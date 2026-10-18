@@ -26,7 +26,7 @@ describe("apiKeyAuth factory", () => {
   it("returns 401 UNAUTHORIZED when the header is missing", async () => {
     const res = await request(buildApp(handler(() => "secret"))).get("/protected");
     expect(res.status).toBe(401);
-    expect(res.body).toEqual({ error: "Unauthorized", code: "UNAUTHORIZED" });
+    expect(res.body).toEqual({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
   });
 
   it("returns 401 for a wrong key of the same length", async () => {

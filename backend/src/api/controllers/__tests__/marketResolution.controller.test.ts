@@ -41,7 +41,7 @@ describe("POST /api/admin/markets/:marketId/resolve (#1393)", () => {
       .send({ outcome: "FighterA" });
 
     expect(res.status).toBe(202);
-    expect(res.body).toEqual({ success: true, marketId: "m1", outcome: "FighterA" });
+    expect(res.body).toEqual({ data: { success: true, marketId: "m1", outcome: "FighterA" } });
     expect(enqueueResolution).toHaveBeenCalledWith("m1", "FighterA");
   });
 
@@ -51,7 +51,7 @@ describe("POST /api/admin/markets/:marketId/resolve (#1393)", () => {
       .send({ outcome: "fighter_a" });
 
     expect(res.status).toBe(400);
-    expect(res.body).toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(res.body).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
     expect(enqueueResolution).not.toHaveBeenCalled();
   });
 
@@ -63,7 +63,7 @@ describe("POST /api/admin/markets/:marketId/resolve (#1393)", () => {
       .send({ outcome: "Draw" });
 
     expect(res.status).toBe(404);
-    expect(res.body).toMatchObject({ code: "NOT_FOUND" });
+    expect(res.body).toMatchObject({ error: { code: "NOT_FOUND" } });
     expect(enqueueResolution).not.toHaveBeenCalled();
   });
 
@@ -75,7 +75,7 @@ describe("POST /api/admin/markets/:marketId/resolve (#1393)", () => {
       .send({ outcome: "NoContest" });
 
     expect(res.status).toBe(500);
-    expect(res.body).toMatchObject({ code: "INTERNAL_ERROR" });
+    expect(res.body).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
   });
 });
 
