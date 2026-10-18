@@ -7,9 +7,10 @@ import {
   getMarketBetsHandler,
   getMarketOddsHistoryHandler,
   createMarketHandler,
-  createMarketSchema,
 } from "../controllers/market.controller";
+import { createMarketSchema } from "../schemas/market.schema";
 import { walletAuthMiddleware } from "../middleware/walletAuth.middleware";
+import { enforceCreatorBinding } from "../middleware/creatorBinding.middleware";
 import { validate } from "../middleware/validate";
 
 const router = Router();
@@ -24,11 +25,12 @@ router.get("/", getMarketsHandler);
 
 // POST /api/markets
 // Creator must prove wallet ownership via challenge/response (#1225 B-47).
-// Body is validated with zod before the handler runs.
+// Body is validated with zod, then createdBy must match the signing wallet (#1403).
 router.post(
   "/",
   walletAuthMiddleware(),
   validate({ body: createMarketSchema }),
+  enforceCreatorBinding,
   createMarketHandler,
 );
 

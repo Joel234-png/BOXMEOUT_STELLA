@@ -6,6 +6,7 @@ import * as marketService from "../../services/market.service";
 import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";
 import { db } from "../../db";
+import { createMarketSchema } from "../schemas/market.schema";
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
@@ -19,18 +20,6 @@ const marketsQuerySchema = z.object({
 const marketBetsQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().positive().max(100).default(20),
-});
-
-export const createMarketSchema = z.object({
-  id: z.string().min(1),
-  contractAddress: z.string().min(1),
-  fighterA: z.record(z.unknown()),
-  fighterB: z.record(z.unknown()),
-  scheduledAt: z.string().datetime({ message: "scheduledAt must be a valid ISO 8601 datetime" }),
-  bettingEndsAt: z.string().datetime({ message: "bettingEndsAt must be a valid ISO 8601 datetime" }),
-  createdBy: z.string().min(1),
-  oracleAddress: z.string().min(1),
-  txHash: z.string().optional(),
 });
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
