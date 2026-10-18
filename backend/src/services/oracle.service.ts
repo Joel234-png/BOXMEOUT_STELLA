@@ -386,7 +386,7 @@ export async function listPendingResolutions(): Promise<Market[]> {
 }
 
 /**
- * Records a dispute in DB and submits raise_dispute() on-chain.
+ * Records a dispute in DB and submits dispute_resolution() on-chain.
  * Notifies admin via internal alert.
  */
 export async function raiseDispute(
@@ -409,7 +409,13 @@ export async function raiseDispute(
   const contract = new Contract(market.contractAddress);
 
   const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
-    .addOperation(contract.call("raise_dispute", nativeToScVal(dispute.id, { type: "string" })))
+    .addOperation(
+      contract.call(
+        "dispute_resolution",
+        nativeToScVal(bettor, { type: "address" }),
+        nativeToScVal(reason, { type: "string" }),
+      ),
+    )
     .setTimeout(30)
     .build();
 

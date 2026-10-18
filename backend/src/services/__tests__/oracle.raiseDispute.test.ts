@@ -2,7 +2,7 @@
  * B-82: raiseDispute() unit tests.
  *
  * Covers the "market not Resolved" rejection and the happy path
- * (DB dispute row, on-chain raise_dispute call, market moved to Disputed,
+ * (DB dispute row, on-chain dispute_resolution call, market moved to Disputed,
  * admin log entry). Stellar RPC, BullMQ and Prisma are all mocked.
  */
 
@@ -99,7 +99,7 @@ describe("raiseDispute (B-82)", () => {
     expect(mockDisputeCreate).not.toHaveBeenCalled();
   });
 
-  it("records the dispute, submits raise_dispute on-chain and marks the market Disputed", async () => {
+  it("records the dispute, submits dispute_resolution on-chain and marks the market Disputed", async () => {
     mockMarketFindUnique.mockResolvedValue(RESOLVED_MARKET);
     mockDisputeCreate.mockResolvedValue({ id: "dispute-7", marketId: "market-1" });
 
@@ -109,7 +109,7 @@ describe("raiseDispute (B-82)", () => {
     expect(mockDisputeCreate).toHaveBeenCalledWith({
       data: { marketId: "market-1", raisedBy: "GBETTOR", reason: "wrong winner" },
     });
-    expect(mockCall).toHaveBeenCalledWith("raise_dispute", expect.anything());
+    expect(mockCall).toHaveBeenCalledWith("dispute_resolution", expect.anything(), expect.anything());
     expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     expect(mockTransaction).toHaveBeenCalledTimes(1);
     expect(mockMarketUpdate).toHaveBeenCalledWith({
