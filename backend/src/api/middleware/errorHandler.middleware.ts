@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
-import { logger } from "../../logger";
+import { logger, sanitizeErrorForLog } from "../../logger";
 import { AppError } from "../../errors";
 
 /**
@@ -30,7 +30,7 @@ export function errorHandlerMiddleware(
   const requestId = (req as Request & { id?: string }).id;
 
   logger.error(
-    { err, path: req.path, method: req.method, requestId },
+    { err: sanitizeErrorForLog(err), path: req.path, method: req.method, requestId },
     "unhandled request error",
   );
 
