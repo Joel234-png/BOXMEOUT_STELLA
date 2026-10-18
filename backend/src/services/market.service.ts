@@ -169,17 +169,22 @@ export function calculateImpliedOdds(
   return { impliedOddsA, impliedOddsB };
 }
 
+export interface MarketPage {
+  data: Market[];
+  total: number;
+}
+
 export async function getAllMarkets(
   filters?: MarketFilters,
   pagination?: Pagination
-): Promise<Market[]> {
+): Promise<MarketPage> {
   const cacheKey = listCacheKey(filters, pagination);
 
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
       recordCacheHit();
-      return JSON.parse(cached) as Market[];
+      return JSON.parse(cached) as MarketPage;
     }
   } catch (err) {
     logger.warn({ err, cacheKey }, "Market list cache read failed");
@@ -199,17 +204,22 @@ export async function getAllMarkets(
   const page = pagination?.page ?? 1;
   const limit = Math.min(pagination?.pageSize ?? 20, MAX_PAGE_SIZE);
 
-  const markets = await db.market.findMany({
-    where,
-    orderBy: { scheduledAt: "asc" },
-    skip: (page - 1) * limit,
-    take: limit,
-  });
+  const [markets, total] = await Promise.all([
+    db.market.findMany({
+      where,
+      orderBy: { scheduledAt: "asc" },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    db.market.count({ where }),
+  ]);
+
+  const result: MarketPage = { data: markets, total };
 
   try {
     await redis.set(
       cacheKey,
-      JSON.stringify(markets),
+      JSON.stringify(result),
       "EX",
       MARKET_CACHE_TTL_SECONDS
     );
@@ -217,7 +227,7 @@ export async function getAllMarkets(
     logger.warn({ err, cacheKey }, "Market list cache write failed");
   }
 
-  return markets;
+  return result;
 }
 
 /**

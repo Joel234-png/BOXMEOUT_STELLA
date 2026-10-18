@@ -3,6 +3,7 @@ import { BetSide } from "@prisma/client";
 import { z } from "zod";
 import { logger } from "../../logger";
 import * as betService from "../../services/bet.service";
+import { pageMeta, pageQuerySchema } from "../schemas/pagination";
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
@@ -11,17 +12,12 @@ const stellarAddressSchema = z
   .string()
   .regex(/^G[A-Z0-9]{55}$/, "Invalid Stellar address");
 
-const betsByAddressQuerySchema = z.object({
+const betsByAddressQuerySchema = pageQuerySchema.extend({
   status: z.enum(["pending", "won", "lost", "claimed"]).optional(),
   marketId: z.string().optional(),
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-const positionsQuerySchema = z.object({
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
-});
+const positionsQuerySchema = pageQuerySchema;
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -52,7 +48,13 @@ export async function getBetsByAddressHandler(req: Request, res: Response): Prom
     // Apply pagination after filtering (consistent with leaderboard pattern)
     const skip = (page - 1) * limit;
     const paginated = bets.slice(skip, skip + limit);
-    res.status(200).json({ data: paginated, page, limit, total: bets.length });
+    res.status(200).json({
+      data: paginated,
+      page,
+      limit,
+      total: bets.length,
+      meta: pageMeta(page, limit, bets.length),
+    });
   } catch (err) {
     logger.error({ err }, "getBetsByAddressHandler failed");
     res.status(500).json({ error: "Internal server error" });
@@ -84,14 +86,6 @@ export async function getPortfolioHandler(
 }
 
 /**
- * GET /api/users/:address/bets   (#1088)
- * Alias route — same as /api/bets/:address but under /users path.
- */
-export async function getUserBetsHandler(req: Request, res: Response): Promise<void> {
-  return getBetsByAddressHandler(req, res);
-}
-
-/**
  * GET /api/users/:address/positions  (#1088)
  * Returns open/active bet positions for a user with pagination.
  */
@@ -118,7 +112,13 @@ export async function getUserPositionsHandler(req: Request, res: Response): Prom
     const bets = await betService.getBetsByAddress(addressParsed.data, { status: "pending" });
     const skip = (page - 1) * limit;
     const paginated = bets.slice(skip, skip + limit);
-    res.status(200).json({ data: paginated, page, limit, total: bets.length });
+    res.status(200).json({
+      data: paginated,
+      page,
+      limit,
+      total: bets.length,
+      meta: pageMeta(page, limit, bets.length),
+    });
   } catch (err) {
     logger.error({ err }, "getUserPositionsHandler failed");
     res.status(500).json({ error: "Internal server error" });

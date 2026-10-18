@@ -7,20 +7,22 @@ import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";
 import { db } from "../../db";
 import { createMarketSchema } from "../schemas/market.schema";
+import {
+  cursorMeta,
+  cursorQuerySchema,
+  pageMeta,
+  pageQuerySchema,
+} from "../schemas/pagination";
+import * as betService from "../../services/bet.service";
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
-const marketsQuerySchema = z.object({
+const marketsQuerySchema = pageQuerySchema.extend({
   status: z.nativeEnum(MarketStatus).optional(),
   weightClass: z.string().optional(),
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-const marketBetsQuerySchema = z.object({
-  cursor: z.string().optional(),
-  limit: z.coerce.number().int().positive().max(100).default(20),
-});
+const marketBetsQuerySchema = cursorQuerySchema;
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -37,10 +39,18 @@ export async function searchMarketsHandler(
     res.status(400).json({ error: "q is required", code: "VALIDATION_ERROR" });
     return;
   }
-  const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
+  const parsed = pageQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Validation failed",
+      code: "VALIDATION_ERROR",
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+  const { page, limit } = parsed.data;
   const result = await searchMarkets(q, page, limit);
-  res.json(result);
+  res.json({ ...result, page, limit, meta: pageMeta(page, limit, result.total) });
 }
 
 /**
@@ -60,11 +70,11 @@ export async function getMarketsHandler(req: Request, res: Response): Promise<vo
 
   try {
     const { status, weightClass, page, limit } = parsed.data;
-    const markets = await marketService.getAllMarkets(
+    const { data, total } = await marketService.getAllMarkets(
       { status, weightClass },
-      { page, limit }
+      { page, pageSize: limit }
     );
-    res.json({ data: markets, page, limit });
+    res.json({ data, page, limit, meta: pageMeta(page, limit, total) });
   } catch (err) {
     logger.error({ err }, "getMarketsHandler failed");
     res.status(500).json({ error: "Internal server error" });
@@ -187,11 +197,11 @@ export async function getMarketBetsHandler(req: Request, res: Response): Promise
 
   try {
     const { cursor, limit } = parsed.data;
-    const { data, nextCursor } = await marketService.getMarketLeaderboard(req.params.id, {
-      cursor,
+    const { bets, nextCursor } = await betService.getBetsByMarketPaginated(req.params.id, {
+      cursor: cursor || undefined,
       limit,
     });
-    res.json({ data, nextCursor, limit });
+    res.json({ data: bets, nextCursor, limit, meta: cursorMeta(nextCursor) });
   } catch (err) {
     logger.error({ err }, "getMarketBetsHandler failed");
     res.status(500).json({ error: "Internal server error" });

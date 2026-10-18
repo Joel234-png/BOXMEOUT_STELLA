@@ -45,6 +45,43 @@ The environment variable names and header names are consistent across code and c
 
 ---
 
+## Pagination
+
+Every list endpoint follows one of two rules. Pick the rule by the shape of the data:
+
+| Rule | Use for | Query params | `meta` in response |
+| ---- | ------- | ------------ | ------------------ |
+| **Cursor** | Append-only feeds that grow while clients read them (bets, user bets) | `cursor`, `limit` | `{ hasMore, nextCursor }` |
+| **Page** | Catalogue lists where clients render page counts (markets, search) | `page`, `limit` | `{ total, hasMore }` |
+
+Rules that apply to both:
+
+- `limit` is a positive integer, defaults to `20`, and is capped at `100`. Values above the cap, or
+  non-positive or non-numeric values, return `400 VALIDATION_ERROR`. The shared schema lives in
+  `backend/src/api/schemas/pagination.ts`.
+- `page` is 1-based and defaults to `1`.
+- `nextCursor` is opaque. Pass it back unchanged as `cursor` to get the next page. `null` means
+  there are no more rows.
+- `meta.hasMore` is always present. `meta.total` is present on page-based lists.
+
+Example page-based response:
+
+```json
+{ "data": [], "page": 2, "limit": 20, "meta": { "total": 45, "hasMore": true } }
+```
+
+Example cursor-based response:
+
+```json
+{ "bets": [], "nextCursor": "eyJwbGFjZWRBdCI6...", "meta": { "hasMore": true, "nextCursor": "eyJwbGFjZWRBdCI6..." } }
+```
+
+Bet history endpoints (`GET /api/bets/:address`, `GET /api/bets/:address/portfolio`) still return the
+legacy top-level `total` alongside `meta`. The leaderboard (`GET /api/bets/leaderboard`) is a ranked
+top-N snapshot with no paging and is not a list in this sense.
+
+---
+
 ## Users
 
 ### `GET /api/users/:address`
@@ -77,11 +114,14 @@ Update profile fields. Requires wallet-signature auth matching `:address`.
 
 ### `GET /api/users/:address/bets`
 
-Paginated bet history for a wallet.
+Cursor-paginated bet history for a wallet, ordered by `(placedAt, id)` descending.
 
-**Query params:** `page`, `limit`
+**Query params:** `cursor`, `limit` (max 100)
 
-**Response `200`** — array of Bet objects
+**Response `200`**
+```json
+{ "bets": [], "nextCursor": null, "meta": { "hasMore": false, "nextCursor": null } }
+```
 
 ---
 
