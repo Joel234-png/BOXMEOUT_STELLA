@@ -287,7 +287,3 @@ export async function resolveDisputeHandler(
   }
 }
 
-/**
- * POST /api/admin/markets/:marketId/resolve
- * Body: { outcome, source }
- * Admin-protected. Resolves a market by ID and writes an 
