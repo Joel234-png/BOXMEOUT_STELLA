@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
+import helmet from "helmet";
 import { httpLogger } from "./logger";
 import { config } from "./config";
 import { auditLogMiddleware } from "./api/middleware/audit-log.middleware";
@@ -36,6 +37,14 @@ export function createApp(): express.Application {
 
   // B-59: attach / echo X-Request-Id before any logging or routing
   app.use(requestIdMiddleware);
+
+  // B-86: security headers (HSTS, X-Content-Type-Options, X-Frame-Options, ...).
+  // Swagger UI needs inline scripts and styles, so /docs gets a CSP-free variant.
+  const securityHeaders = helmet();
+  const docsSecurityHeaders = helmet({ contentSecurityPolicy: false });
+  app.use((req: express.Request, res: express.Response, next: express.NextFunction) =>
+    (req.path.startsWith("/docs") ? docsSecurityHeaders : securityHeaders)(req, res, next)
+  );
 
   // B-57: cap JSON body size to mitigate oversized-payload abuse
   app.use(express.json({ limit: "100kb" }));
