@@ -252,6 +252,14 @@ Oracle record management (list, create, update, delete) is admin-only and lives 
 | GET | `/api/stats` | Aggregate platform statistics. |
 | GET | `/api/stats/leaderboard` | Top users by volume or profit. Query: `period?`, `limit?`. |
 
+## Leaderboard
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET | `/api/leaderboard` | Top bettors ranked by realised profit. Query: `period=7d\|30d\|all` (default `all`, invalid values return `400`), `limit?` (max 100). Returns an array of entries. |
+
+`GET /api/bets/leaderboard` is a deprecated alias that still responds, with a `Deprecation` header pointing to `/api/leaderboard`. Remove callers before it is dropped.
+
 ## Admin
 
 | Method | Path | Description |

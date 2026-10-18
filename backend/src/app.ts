@@ -15,6 +15,7 @@ import authRoutes from "./api/routes/auth.routes";
 import oracleRoutes from "./api/routes/oracle.routes";
 import healthRoutes from "./api/routes/health.routes";
 import docsRoutes from "./api/routes/docs.routes";
+import leaderboardRoutes from "./api/routes/leaderboard.routes";
 
 export function createApp(): express.Application {
   const app = express();
