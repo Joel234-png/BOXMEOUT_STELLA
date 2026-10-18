@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import { MarketStatus } from "@prisma/client";
 import { z } from "zod";
-import { logger } from "../../logger";
+import { logger, sanitizeErrorForLog } from "../../logger";
+import { isUniqueConstraintError } from "../../lib/prisma-errors";
 import * as marketService from "../../services/market.service";
 import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";
@@ -158,7 +159,12 @@ export async function createMarketHandler(req: Request, res: Response): Promise<
     });
     res.status(201).json({ data: market });
   } catch (err) {
-    logger.error({ err }, "createMarketHandler failed");
+    // B-103: a market id that already exists is a conflict, not a server error
+    if (isUniqueConstraintError(err)) {
+      res.status(409).json({ error: "Market already exists", code: "CONFLICT" });
+      return;
+    }
+    logger.error({ err: sanitizeErrorForLog(err) }, "createMarketHandler failed");
     res.status(500).json({ error: "Internal server error" });
   }
 }

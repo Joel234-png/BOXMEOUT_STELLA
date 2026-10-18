@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
 import { logger, sanitizeErrorForLog } from "../../logger";
 import { AppError } from "../../errors";
+import { isUniqueConstraintError } from "../../lib/prisma-errors";
 
 /**
  * Centralized error-to-HTTP mapping. Must be registered last, after all routes.
@@ -46,6 +47,12 @@ export function errorHandlerMiddleware(
 
   if (err instanceof AppError) {
     res.status(err.statusCode).json({ error: err.message, code: err.code, requestId });
+    return;
+  }
+
+  // B-103: a unique-constraint violation means the resource already exists
+  if (isUniqueConstraintError(err)) {
+    res.status(409).json({ error: "Resource already exists", code: "CONFLICT", requestId });
     return;
   }
 
