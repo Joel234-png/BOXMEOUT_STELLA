@@ -88,6 +88,15 @@ const configSchema = z.object({
     .string({ required_error: "REDIS_URL is required" })
     .url("REDIS_URL must be a valid URL"),
 
+  /** B-101: Days to keep AuditLog rows before the daily prune job deletes them */
+  AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
+
+  /**
+   * B-101: Days to keep processed EventLog rows before the daily prune job
+   * deletes them. Unprocessed rows are never pruned.
+   */
+  EVENT_LOG_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
+
   /** Base URL for the external fight data provider (BoxRec or equivalent) */
   BOXREC_API_URL: z.string().url().optional(),
 

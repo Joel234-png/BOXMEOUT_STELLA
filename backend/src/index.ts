@@ -8,6 +8,10 @@ import {
   startResolutionService,
   stopResolutionService,
 } from "./services/resolution.service";
+import {
+  startRetentionService,
+  stopRetentionService,
+} from "./services/retention.service";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
@@ -18,6 +22,9 @@ const app = createApp();
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   startResolutionService();
+  startRetentionService().catch((err) =>
+    logger.error({ err }, "failed to start retention service"),
+  );
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
@@ -60,6 +67,9 @@ async function shutdown(signal: string): Promise<void> {
     // 2. Stop the resolution cron job.
     stopResolutionService();
     logger.info("Resolution service stopped");
+
+    // 2b. Stop the daily retention job (waits for an in-flight prune to finish).
+    await stopRetentionService();
 
     // 3. Close Prisma connection pool.
     await db.$disconnect();

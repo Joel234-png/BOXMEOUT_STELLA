@@ -147,6 +147,8 @@ model AuditLog {
   requestBody   Json?
   statusCode    Int
   timestamp     DateTime @default(now())
+
+  @@index([timestamp])
 }
 
 model User {
