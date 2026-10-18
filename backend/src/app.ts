@@ -1,11 +1,11 @@
-import express, { Request, Response, NextFunction } from "express";
+import express from "express";
 import cors from "cors";
-import helmet from "helmet";
 import { httpLogger } from "./logger";
 import { config } from "./config";
 import { auditLogMiddleware } from "./api/middleware/audit-log.middleware";
 import { errorHandlerMiddleware } from "./api/middleware/errorHandler.middleware";
 import { requestIdMiddleware } from "./api/middleware/requestId.middleware";
+import { securityHeadersMiddleware } from "./api/middleware/securityHeaders.middleware";
 import { metricsRouter, httpRequestDuration } from "./metrics";
 import marketRoutes from "./api/routes/market.routes";
 import betRoutes from "./api/routes/bet.routes";
@@ -39,13 +39,8 @@ export function createApp(): express.Application {
   // B-59: attach / echo X-Request-Id before any logging or routing
   app.use(requestIdMiddleware);
 
-  // B-86: security headers (HSTS, X-Content-Type-Options, X-Frame-Options, ...).
-  // Swagger UI needs inline scripts and styles, so /docs gets a CSP-free variant.
-  const securityHeaders = helmet();
-  const docsSecurityHeaders = helmet({ contentSecurityPolicy: false });
-  app.use((req: express.Request, res: express.Response, next: express.NextFunction) =>
-    (req.path.startsWith("/docs") ? docsSecurityHeaders : securityHeaders)(req, res, next)
-  );
+  // B-86: security headers before any route handler
+  app.use(securityHeadersMiddleware);
 
   // B-57: cap JSON body size to mitigate oversized-payload abuse
   app.use(express.json({ limit: "100kb" }));
