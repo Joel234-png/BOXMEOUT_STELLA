@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { stellarAddress, stellarContractAddress } from "../middleware/validate";
+import { pageQuerySchema } from "./pagination";
 
 /**
  * Body schema for POST /api/markets.
@@ -16,4 +17,18 @@ export const createMarketSchema = z.object({
   createdBy: stellarAddress,
   oracleAddress: stellarAddress,
   txHash: z.string().optional(),
+});
+
+/**
+ * Query schema for GET /api/markets/search.
+ * q is trimmed and limited to 100 characters; it is passed to Postgres only as
+ * a bound parameter, and the repository uses websearch_to_tsquery so operators
+ * and quotes in user input can never produce a syntax error.
+ */
+export const marketSearchQuerySchema = pageQuerySchema.extend({
+  q: z
+    .string({ required_error: "q is required" })
+    .trim()
+    .min(1, "q is required")
+    .max(100, "q must be at most 100 characters"),
 });

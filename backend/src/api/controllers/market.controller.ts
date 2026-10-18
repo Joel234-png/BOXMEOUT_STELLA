@@ -3,7 +3,6 @@ import { MarketStatus } from "@prisma/client";
 import { z } from "zod";
 import { logger } from "../../logger";
 import * as marketService from "../../services/market.service";
-import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";
 import { db } from "../../db";
 import { createMarketSchema } from "../schemas/market.schema";
@@ -25,33 +24,6 @@ const marketsQuerySchema = pageQuerySchema.extend({
 const marketBetsQuerySchema = cursorQuerySchema;
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
-
-/**
- * GET /api/markets/search?q=&page=&limit=
- * Full-text search across question + description. Returns paginated { data, total }.
- */
-export async function searchMarketsHandler(
-  req: Request,
-  res: Response
-): Promise<void> {
-  const q = String(req.query.q ?? "").trim();
-  if (!q) {
-    res.status(400).json({ error: "q is required", code: "VALIDATION_ERROR" });
-    return;
-  }
-  const parsed = pageQuerySchema.safeParse(req.query);
-  if (!parsed.success) {
-    res.status(400).json({
-      error: "Validation failed",
-      code: "VALIDATION_ERROR",
-      details: parsed.error.flatten(),
-    });
-    return;
-  }
-  const { page, limit } = parsed.data;
-  const result = await searchMarkets(q, page, limit);
-  res.json({ ...result, page, limit, meta: pageMeta(page, limit, result.total) });
-}
 
 /**
  * GET /api/markets
