@@ -17,8 +17,16 @@ const marketsQuerySchema = z.object({
 });
 
 const marketBetsQuerySchema = z.object({
-  cursor: z.string().optional(),
+  page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
+const oddsHistoryQuerySchema = z.object({
+  interval: z.enum(["5m", "1h"]).optional(),
+});
+
+const resolveMarketBodySchema = z.object({
+  oracle_result_id: z.coerce.number().int().positive(),
 });
 
 export const createMarketSchema = z.object({
@@ -73,7 +81,7 @@ export async function getMarketsHandler(req: Request, res: Response): Promise<vo
     const { status, weightClass, page, limit } = parsed.data;
     const markets = await marketService.getAllMarkets(
       { status, weightClass },
-      { page, limit }
+      { page, pageSize: limit }
     );
     res.json({ data: markets, page, limit });
   } catch (err) {
@@ -120,7 +128,7 @@ export async function getMarketOddsHistoryHandler(
   }
 
   try {
-    const snapshots = await marketService.getMarketOddsHistory(
+    const snapshots = await marketService.getOddsHistory(
       req.params.id,
       parsed.data.interval
     );
@@ -182,8 +190,8 @@ export async function getMarketStatsHandler(req: Request, res: Response): Promis
 
 /**
  * GET /api/markets/:id/bets
- * Returns leaderboard/bets for a market with cursor pagination.
- * Query params: cursor, limit (max 100). Response includes nextCursor.
+ * Returns leaderboard/bets for a market with page pagination.
+ * Query params: page, limit (max 100).
  */
 export async function getMarketBetsHandler(req: Request, res: Response): Promise<void> {
   const parsed = marketBetsQuerySchema.safeParse(req.query);
@@ -197,12 +205,9 @@ export async function getMarketBetsHandler(req: Request, res: Response): Promise
   }
 
   try {
-    const { cursor, limit } = parsed.data;
-    const { data, nextCursor } = await marketService.getMarketLeaderboard(req.params.id, {
-      cursor,
-      limit,
-    });
-    res.json({ data, nextCursor, limit });
+    const { page, limit } = parsed.data;
+    const data = await marketService.getMarketLeaderboard(req.params.id, { page, pageSize: limit });
+    res.json({ data, page, limit });
   } catch (err) {
     logger.error({ err }, "getMarketBetsHandler failed");
     res.status(500).json({ error: "Internal server error" });
@@ -213,33 +218,27 @@ export async function getMarketBetsHandler(req: Request, res: Response): Promise
  * POST /api/admin/markets/resolve
  * Body: { oracle_result_id: number }
  * Admin-protected. Confirms an oracle result and triggers on-chain market resolution.
+ * Admin mutations are recorded by auditLogMiddleware (#1258).
  */
 export async function resolveMarketHandler(
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
+  const parsed = resolveMarketBodySchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Validation failed",
+      code: "VALIDATION_ERROR",
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+
   try {
-    const { market_id, marketId, outcome, oracle_result_id, source, reporter } = req.body;
-    const targetMarketId = market_id || marketId;
-
-    if (oracle_result_id === undefined || oracle_result_id === null) {
-      res
-        .status(400)
-        .json({ error: "oracle_result_id is required", code: "VALIDATION_ERROR" });
-      return;
-    }
-
-    const id = Number(oracle_result_id);
-    if (!Number.isInteger(id) || id <= 0) {
-      res.status(400).json({
-        error: "oracle_result_id must be a positive integer",
-        code: "VALIDATION_ERROR",
-      });
-      return;
-    }
-
-    res.status(400).json({ error: "market_id (or marketId) and outcome required", code: "VALIDATION_ERROR" });
+    const admin = (req as any).user?.id || "admin";
+    await oracleService.confirmFightResult(String(parsed.data.oracle_result_id), admin);
+    res.status(200).json({ status: "ok" });
   } catch (err) {
     next(err);
   }
@@ -250,7 +249,8 @@ export async function resolveMarketHandler(
  */
 export async function resolveDisputeHandler(
   req: Request,
-  res: Response
+  res: Response,
+  next: NextFunction
 ): Promise<void> {
   try {
     const { dispute_id, disputeId, outcome, notes, decisionNotes } = req.body;
@@ -274,12 +274,8 @@ export async function resolveDisputeHandler(
 
     const admin = (req as any).user?.id || (req as any).admin || "admin";
 
-    const result = await ResolutionService.handleDispute({
-      disputeId: String(targetDisputeId),
-      outcome,
-      admin,
-      notes: String(notesText),
-    });
+    await oracleService.resolveDispute(String(targetDisputeId), outcome, admin);
+    const result = { disputeId: String(targetDisputeId), outcome, notes: String(notesText) };
 
     res.status(200).json({ success: true, status: "ok", data: result });
   } catch (err) {
@@ -288,6 +284,32 @@ export async function resolveDisputeHandler(
 }
 
 /**
- * POST /api/admin/markets/:marketId/resolve
- * Body: { outcome, source }
- * Admin-protected. Resolves a market by ID and writes an 
+ * GET /api/admin/markets/pending
+ */
+export async function getPendingResolutionsHandler(
+  req: Request,
+  res: Response
+): Promise<void> {
+  try {
+    const markets = await marketService.getAllMarkets({ status: "Locked" });
+    res.json({ data: markets });
+  } catch (err) {
+    logger.error({ err }, "getPendingResolutionsHandler failed");
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * GET /health
+ */
+export async function healthCheckHandler(
+  req: Request,
+  res: Response
+): Promise<void> {
+  try {
+    await db.$queryRaw`SELECT 1`;
+    res.status(200).json({ status: "ok", db: "connected" });
+  } catch {
+    res.status(503).json({ status: "degraded", db: "disconnected" });
+  }
+}
