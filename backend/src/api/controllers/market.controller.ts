@@ -6,6 +6,7 @@ import * as marketService from "../../services/market.service";
 import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";
 import { db } from "../../db";
+import { ok, fail } from "../response";
 
 /** Admin identity from the auth context, falling back to a generic label. */
 function adminIdFromRequest(req: Request): string {
@@ -59,13 +60,13 @@ export async function searchMarketsHandler(
 ): Promise<void> {
   const q = String(req.query.q ?? "").trim();
   if (!q) {
-    res.status(400).json({ error: "q is required", code: "VALIDATION_ERROR" });
+    fail(res, 400, "VALIDATION_ERROR", "q is required");
     return;
   }
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
   const result = await searchMarkets(q, page, limit);
-  res.json(result);
+  ok(res, result.data, { meta: { total: result.total } });
 }
 
 /**
@@ -75,11 +76,7 @@ export async function searchMarketsHandler(
 export async function getMarketsHandler(req: Request, res: Response): Promise<void> {
   const parsed = marketsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({
-      error: "Validation failed",
-      code: "VALIDATION_ERROR",
-      details: parsed.error.flatten(),
-    });
+    fail(res, 400, "VALIDATION_ERROR", "Validation failed", { details: parsed.error.flatten() });
     return;
   }
 
@@ -89,10 +86,10 @@ export async function getMarketsHandler(req: Request, res: Response): Promise<vo
       { status, weightClass },
       { page, pageSize: limit }
     );
-    res.json({ data: markets, page, limit });
+    ok(res, markets, { meta: { page, limit } });
   } catch (err) {
     logger.error({ err }, "getMarketsHandler failed");
-    res.status(500).json({ error: "Internal server error" });
+    fail(res, 500, "INTERNAL_ERROR", "Internal server error");
   }
 }
 
@@ -103,13 +100,13 @@ export async function getMarketByIdHandler(req: Request, res: Response): Promise
   try {
     const market = await marketService.getMarketById(req.params.id);
     if (!market) {
-      res.status(404).json({ error: "Market not found" });
+      fail(res, 404, "NOT_FOUND", "Market not found");
       return;
     }
-    res.json({ data: market });
+    ok(res, market);
   } catch (err) {
     logger.error({ err }, "getMarketByIdHandler failed");
-    res.status(500).json({ error: "Internal server error" });
+    fail(res, 500, "INTERNAL_ERROR", "Internal server error");
   }
 }
 
@@ -125,11 +122,7 @@ export async function getMarketOddsHistoryHandler(
 ): Promise<void> {
   const parsed = oddsHistoryQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({
-      error: "Validation failed",
-      code: "VALIDATION_ERROR",
-      details: parsed.error.flatten(),
-    });
+    fail(res, 400, "VALIDATION_ERROR", "Validation failed", { details: parsed.error.flatten() });
     return;
   }
 
@@ -145,7 +138,7 @@ export async function getMarketOddsHistoryHandler(
       return;
     }
     logger.error({ err }, "getMarketOddsHistoryHandler failed");
-    res.status(500).json({ error: "Internal server error" });
+    fail(res, 500, "INTERNAL_ERROR", "Internal server error");
   }
 }
 
@@ -170,10 +163,10 @@ export async function createMarketHandler(req: Request, res: Response): Promise<
       oracleAddress: data.oracleAddress,
       txHash: data.txHash,
     });
-    res.status(201).json({ data: market });
+    ok(res, market, { status: 201 });
   } catch (err) {
     logger.error({ err }, "createMarketHandler failed");
-    res.status(500).json({ error: "Internal server error" });
+    fail(res, 500, "INTERNAL_ERROR", "Internal server error");
   }
 }
 
@@ -190,7 +183,7 @@ export async function getMarketStatsHandler(req: Request, res: Response): Promis
       return;
     }
     logger.error({ err }, "getMarketStatsHandler failed");
-    res.status(500).json({ error: "Internal server error" });
+    fail(res, 500, "INTERNAL_ERROR", "Internal server error");
   }
 }
 
@@ -202,11 +195,7 @@ export async function getMarketStatsHandler(req: Request, res: Response): Promis
 export async function getMarketBetsHandler(req: Request, res: Response): Promise<void> {
   const parsed = marketBetsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({
-      error: "Validation failed",
-      code: "VALIDATION_ERROR",
-      details: parsed.error.flatten(),
-    });
+    fail(res, 400, "VALIDATION_ERROR", "Validation failed", { details: parsed.error.flatten() });
     return;
   }
 
@@ -262,17 +251,17 @@ export async function resolveDisputeHandler(
     const notesText = notes || decisionNotes;
 
     if (!targetDisputeId) {
-      res.status(400).json({ error: "dispute_id is required", code: "VALIDATION_ERROR" });
+      fail(res, 400, "VALIDATION_ERROR", "dispute_id is required");
       return;
     }
 
     if (!outcome) {
-      res.status(400).json({ error: "outcome is required", code: "VALIDATION_ERROR" });
+      fail(res, 400, "VALIDATION_ERROR", "outcome is required");
       return;
     }
 
     if (!notesText || !String(notesText).trim()) {
-      res.status(400).json({ error: "Notes explaining the decision are required for audit", code: "VALIDATION_ERROR" });
+      fail(res, 400, "VALIDATION_ERROR", "Notes explaining the decision are required for audit");
       return;
     }
 
@@ -281,7 +270,7 @@ export async function resolveDisputeHandler(
     await oracleService.resolveDispute(String(targetDisputeId), outcome, admin);
     const result = { disputeId: String(targetDisputeId), outcome, notes: String(notesText) };
 
-    res.status(200).json({ success: true, status: "ok", data: result });
+    ok(res, { success: true });
   } catch (err) {
     next(err);
   }

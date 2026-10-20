@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { z, ZodTypeAny } from "zod";
 import { StrKey } from "@stellar/stellar-sdk";
+import { fail } from "../response";
 
 /**
  * Shared zod schema for Stellar Ed25519 public keys (G... addresses).
@@ -23,7 +24,7 @@ export function validateParam(
     const result = schema.safeParse(req.params[paramName]);
     if (!result.success) {
       const code = result.error.issues[0]?.message ?? "INVALID_ADDRESS";
-      res.status(400).json({ error: code });
+      fail(res, 400, code, "Invalid request parameter");
       return;
     }
     next();
