@@ -17,7 +17,9 @@ const app = createApp();
 
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
-  startResolutionService();
+  startResolutionService().catch((err) =>
+    logger.error({ err }, "Failed to start resolution service")
+  );
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
@@ -57,8 +59,8 @@ async function shutdown(signal: string): Promise<void> {
     );
     logger.info("HTTP server closed");
 
-    // 2. Stop the resolution cron job.
-    stopResolutionService();
+    // 2. Remove the repeatable lifecycle jobs and close their worker.
+    await stopResolutionService();
     logger.info("Resolution service stopped");
 
     // 3. Close Prisma connection pool.

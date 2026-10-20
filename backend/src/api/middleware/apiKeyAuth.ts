@@ -1,47 +1,42 @@
-import { timingSafeEqual } from "crypto";
-import type { NextFunction, Request, RequestHandler, Response } from "express";
-import { fail } from "../response";
+import { createHash, timingSafeEqual } from "crypto";
+import type { RequestHandler } from "express";
 
 export interface ApiKeyAuthOptions {
-  /** Request header that carries the key, e.g. `x-admin-key`. Case-insensitive. */
+  /** Request header carrying the key, e.g. `x-admin-key`. */
   header: string;
-  /** Returns the expected key. An empty or missing value rejects every request. */
-  getKey: () => string | undefined;
+  /**
+   * Returns the expected key. Called on every request so the value always
+   * comes from the validated config rather than a copy taken at load time.
+   */
+  getKey: () => string;
+}
+
+/** Hashing both sides gives equal-length buffers, so the compare leaks no length information. */
+function digest(value: string): Buffer {
+  return createHash("sha256").update(value).digest();
 }
 
 /**
- * Builds a static API-key check for one header.
+ * Static API key authentication. Rejects with 401 `{ error, code }` when the
+ * header is missing, the expected key is empty, or the keys differ.
  *
- * Returns 401 { error, code: "UNAUTHORIZED" } when the header is missing, the
- * expected key is unset, or the provided key does not match. The comparison
- * uses crypto.timingSafeEqual so response timing does not leak key content.
+ * Uses crypto.timingSafeEqual to prevent timing attacks.
  */
 export function apiKeyAuth({ header, getKey }: ApiKeyAuthOptions): RequestHandler {
-  const headerName = header.toLowerCase();
+  return (req, res, next) => {
+    const provided = req.headers[header];
+    const expected = getKey();
 
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const provided = req.headers[headerName];
-    const expected = getKey() ?? "";
-
-    if (typeof provided !== "string" || !provided || !expected || !keysMatch(provided, expected)) {
-      fail(res, 401, "UNAUTHORIZED", "Unauthorized");
+    if (
+      typeof provided !== "string" ||
+      !provided ||
+      !expected ||
+      !timingSafeEqual(digest(provided), digest(expected))
+    ) {
+      res.status(401).json({ error: "Unauthorized", code: "UNAUTHORIZED" });
       return;
     }
 
     next();
   };
-}
-
-function keysMatch(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-
-  // timingSafeEqual throws on unequal lengths, so compare against a copy of
-  // `a` to keep the work constant before rejecting a length mismatch.
-  if (a.length !== b.length) {
-    timingSafeEqual(a, a);
-    return false;
-  }
-
-  return timingSafeEqual(a, b);
 }

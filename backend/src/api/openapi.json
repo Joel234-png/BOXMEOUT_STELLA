@@ -1168,6 +1168,52 @@
         }
       }
     },
+    "/api/leaderboard": {
+      "get": {
+        "tags": ["Leaderboard"],
+        "summary": "Top bettors ranked by realised profit",
+        "parameters": [
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["7d", "30d", "all"], "default": "all" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked leaderboard entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "rank": { "type": "integer" },
+                      "bettor": { "type": "string" },
+                      "realisedProfit": { "type": "string", "description": "stroops, as a string" },
+                      "totalStaked": { "type": "string" },
+                      "totalPayout": { "type": "string" },
+                      "settledBets": { "type": "integer" },
+                      "wonBets": { "type": "integer" },
+                      "winRate": { "type": "number" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid period or limit" }
+        }
+      }
+    },
     "/api/oracle/results": {
       "get": {
         "tags": [

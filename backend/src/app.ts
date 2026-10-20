@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction } from "express";
+import express from "express";
 import cors from "cors";
 import { httpLogger } from "./logger";
 import { config } from "./config";
@@ -6,6 +6,7 @@ import { auditLogMiddleware } from "./api/middleware/audit-log.middleware";
 import { errorHandlerMiddleware } from "./api/middleware/errorHandler.middleware";
 import { notFoundMiddleware } from "./api/middleware/notFound.middleware";
 import { requestIdMiddleware } from "./api/middleware/requestId.middleware";
+import { securityHeadersMiddleware } from "./api/middleware/securityHeaders.middleware";
 import { metricsRouter, httpRequestDuration } from "./metrics";
 import marketRoutes from "./api/routes/market.routes";
 import betRoutes from "./api/routes/bet.routes";
@@ -15,12 +16,13 @@ import authRoutes from "./api/routes/auth.routes";
 import oracleRoutes from "./api/routes/oracle.routes";
 import healthRoutes from "./api/routes/health.routes";
 import docsRoutes from "./api/routes/docs.routes";
+import leaderboardRoutes from "./api/routes/leaderboard.routes";
 
 export function createApp(): express.Application {
   const app = express();
 
   // B-58: trust proxy so req.ip reflects the real client behind a load balancer
-  app.set("trust proxy", config.trustProxy);
+  app.set("trust proxy", config.TRUST_PROXY);
 
   app.set("json replacer", (_key: string, value: unknown) =>
     typeof value === "bigint" ? value.toString() : value
@@ -37,6 +39,9 @@ export function createApp(): express.Application {
 
   // B-59: attach / echo X-Request-Id before any logging or routing
   app.use(requestIdMiddleware);
+
+  // B-86: security headers before any route handler
+  app.use(securityHeadersMiddleware);
 
   // B-57: cap JSON body size to mitigate oversized-payload abuse
   app.use(express.json({ limit: "100kb" }));
@@ -80,8 +85,9 @@ export function createApp(): express.Application {
     app.use("/docs", docsRoutes);
   }
 
-  // #1391: JSON 404 for anything no route matched. Must sit before the error handler.
+  // B-93: unmatched requests get a JSON 404 instead of Express's HTML default
   app.use(notFoundMiddleware);
+
   app.use(errorHandlerMiddleware);
 
   return app;

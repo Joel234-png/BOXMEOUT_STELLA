@@ -4,8 +4,7 @@ import {
   getUserBetsHandler,
   getUserPositionsHandler,
 } from "../controllers/bet.controller";
-import { walletAuthMiddleware } from "../middleware/walletAuth.middleware";
-import { requireOwnAddress } from "../middleware/requireOwnAddress";
+import { requireOwnAddress, walletAuthMiddleware } from "../middleware/walletAuth.middleware";
 
 const router = Router();
 
@@ -13,12 +12,12 @@ const router = Router();
 router.get("/:address", getUserHandler);
 
 // PUT /api/users/:address           — update profile, must own the address (#1223 B-45)
-// whitelist: [] disables the admin whitelist, which applies to admin routes only.
+// Empty whitelist: the admin whitelist (ADMIN_WALLET_ADDRESSES) does not apply to profile owners.
 router.put(
   "/:address",
   walletAuthMiddleware({ whitelist: [] }),
   requireOwnAddress,
-  updateUserHandler,
+  updateUserHandler
 );
 
 // GET /api/users/:address/bets      — paginated bet history (#1088)

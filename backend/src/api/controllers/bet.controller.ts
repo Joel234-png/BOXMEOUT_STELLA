@@ -152,3 +152,34 @@ export async function getPayoutEstimateHandler(req: Request, res: Response): Pro
     fail(res, 500, "INTERNAL_ERROR", "Internal server error");
   }
 }
+
+const leaderboardQuerySchema = z.object({
+  period: z.enum(["7d", "30d", "all"]).default("all"),
+  limit: z.coerce.number().int().positive().optional(),
+});
+
+/**
+ * GET /api/leaderboard?period=7d|30d|all&limit=
+ * Ranks bettors by realised profit for the requested period.
+ * Responds with the ranked entries array (see frontend/lib/api.ts fetchLeaderboard).
+ */
+export async function getLeaderboardHandler(req: Request, res: Response): Promise<void> {
+  const parsed = leaderboardQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Validation failed",
+      code: "VALIDATION_ERROR",
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+
+  try {
+    const { period, limit } = parsed.data;
+    const result = await betService.getLeaderboard(period, limit);
+    res.status(200).json(result.entries);
+  } catch (err) {
+    logger.error({ err }, "getLeaderboardHandler failed");
+    res.status(500).json({ error: "Internal server error" });
+  }
+}

@@ -1,13 +1,12 @@
 import type { Request, Response } from "express";
-import { fail } from "../response";
 
 /**
- * Catch-all for requests that no route handled, including unknown methods on
- * known paths. Must be registered after every route and before
- * errorHandlerMiddleware, otherwise Express's default HTML 404 is returned.
- *
- * Returns 404 { error, code: "NOT_FOUND" }.
+ * B-93: JSON 404 for requests that match no route. Must be registered after
+ * all routes and before errorHandlerMiddleware, so unknown paths and methods
+ * get the same `{ error, code }` shape as every other error response.
  */
-export function notFoundMiddleware(_req: Request, res: Response): void {
-  fail(res, 404, "NOT_FOUND", "Not found");
+export function notFoundMiddleware(req: Request, res: Response): void {
+  const requestId = (req as Request & { id?: string }).id;
+
+  res.status(404).json({ error: "Not found", code: "NOT_FOUND", requestId });
 }

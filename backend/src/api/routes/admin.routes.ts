@@ -14,6 +14,7 @@ import {
   deleteOracleHandler,
 } from "../controllers/oracle.controller";
 import { getAuditLogsHandler } from "../controllers/audit.controller";
+import { reconcileMarketHandler } from "../controllers/market-reconciliation.controller";
 import {
   getFailedSubmissionsHandler,
   retryFailedSubmissionHandler,
@@ -56,10 +57,8 @@ const oracleSubmissionLimiter = rateLimitMiddleware({
 router.get("/markets/pending", getPendingResolutionsHandler);
 // Registered before "/markets/:marketId/resolve" so "dispute" is not captured as a market id.
 router.post("/markets/dispute/resolve", marketResolutionLimiter, resolveDisputeHandler);
-// #1393: market id in the path, outcome in the body.
-router.post("/markets/:marketId/resolve", marketResolutionLimiter, resolveMarketByIdHandler);
-// #1393: deprecated alias, kept for existing callers. Use /markets/:marketId/resolve.
-router.post("/markets/resolve", marketResolutionLimiter, resolveMarketHandler);
+// #1412: reconcile one market against on-chain state (report-only unless autoRepair).
+router.post("/markets/:id/reconcile", reconcileMarketHandler);
 
 // Oracle address management (Issue #455)
 router.get("/oracles", getAllOraclesHandler);
