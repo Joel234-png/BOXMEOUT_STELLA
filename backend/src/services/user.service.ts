@@ -1,7 +1,4 @@
-import { PrismaClient } from "@prisma/client";
-import { getBetsByAddressPaginated, type PaginatedBets } from "./bet.service";
-
-const prisma = new PrismaClient();
+import { db as prisma } from "../db";
 
 export interface UserProfile {
   address: string;

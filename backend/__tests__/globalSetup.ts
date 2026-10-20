@@ -1,14 +1,6 @@
-import { execSync } from "child_process";
-
-// Resets the test database once before the suite. The URL must point at a
-// throwaway database (see DATABASE_URL_TEST in .env.example).
-export default function globalSetup(): void {
-  const url = process.env.DATABASE_URL_TEST || process.env.DATABASE_URL;
-  if (!url) {
-    throw new Error("Set DATABASE_URL_TEST (or DATABASE_URL) before running tests");
-  }
-  execSync("npx prisma migrate reset --force --skip-generate --skip-seed", {
-    stdio: "inherit",
-    env: { ...process.env, DATABASE_URL: url },
-  });
+// Runs once before the whole Jest run. Unit tests mock their infrastructure,
+// so there is nothing to start here; the hook exists so integration suites
+// can add database setup later without touching the Jest config.
+export default async function globalSetup(): Promise<void> {
+  return;
 }

@@ -468,3 +468,75 @@ export async function reconcileMarketFromChain(
   logger.info({ marketId }, "Reconciled market from on-chain state");
   return updated;
 }
+
+export async function getMarketStats(market_id: string): Promise<MarketStats> {
+  const market = await db.market.findUnique({
+    where: { id: market_id },
+    include: { bets: true },
+  });
+
+  if (!market) {
+    throw Object.assign(new Error("Market not found"), { code: "NOT_FOUND" });
+  }
+
+  const totalBets = market.bets.length;
+  const uniqueBettors = new Set(market.bets.map((b) => b.bettor)).size;
+  const poolA = market.poolA;
+  const poolB = market.poolB;
+  const totalVolume = market.totalPool;
+
+  const impliedOddsA =
+    totalVolume > 0n ? Number((poolA * 10000n) / totalVolume) / 100 : 50;
+  const impliedOddsB =
+    totalVolume > 0n ? Number((poolB * 10000n) / totalVolume) / 100 : 50;
+
+  return {
+    totalBets,
+    uniqueBettors,
+    poolA,
+    poolB,
+    totalVolume,
+    impliedOddsA,
+    impliedOddsB,
+  };
+}
+
+/**
+ * Returns a paginated leaderboard of bettors for a market, sorted by total staked descending.
+ * Groups bets by bettor and aggregates total staked and bet count.
+ */
+export async function getMarketLeaderboard(
+  market_id: string,
+  pagination?: Pagination
+): Promise<LeaderboardEntry[]> {
+  const page = pagination?.page ?? 1;
+  const limit = Math.min(pagination?.pageSize ?? 20, MAX_PAGE_SIZE);
+  const skip = (page - 1) * limit;
+
+  const bets = await db.bet.findMany({
+    where: { marketId: market_id },
+    select: { bettor: true, amount: true },
+  });
+
+  // Aggregate by bettor
+  const bettorMap = new Map<string, { totalStaked: bigint; betCount: number }>();
+  for (const bet of bets) {
+    const existing = bettorMap.get(bet.bettor);
+    if (existing) {
+      existing.totalStaked += bet.amount;
+      existing.betCount += 1;
+    } else {
+      bettorMap.set(bet.bettor, { totalStaked: bet.amount, betCount: 1 });
+    }
+  }
+
+  // Sort by totalStaked desc, apply pagination
+  const sorted = Array.from(bettorMap.entries())
+    .map(([bettor, stats]) => ({ bettor, ...stats }))
+    .sort((a, b) =>
+      b.totalStaked > a.totalStaked ? 1 : b.totalStaked < a.totalStaked ? -1 : 0
+    );
+
+  return sorted.slice(skip, skip + limit);
+}
+
