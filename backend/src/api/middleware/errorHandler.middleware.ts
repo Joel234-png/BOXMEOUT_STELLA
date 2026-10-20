@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
-import { logger } from "../../logger";
+import { logger, sanitizeErrorForLog } from "../../logger";
 import { AppError } from "../../errors";
 import { fail } from "../response";
 
@@ -31,7 +31,7 @@ export function errorHandlerMiddleware(
   const requestId = (req as Request & { id?: string }).id;
 
   logger.error(
-    { err, path: req.path, method: req.method, requestId },
+    { err: sanitizeErrorForLog(err), path: req.path, method: req.method, requestId },
     "unhandled request error",
   );
 
@@ -45,6 +45,12 @@ export function errorHandlerMiddleware(
 
   if (err instanceof AppError) {
     fail(res, err.statusCode, err.code, err.message, { requestId });
+    return;
+  }
+
+  // B-103: a unique-constraint violation means the resource already exists
+  if (isUniqueConstraintError(err)) {
+    res.status(409).json({ error: "Resource already exists", code: "CONFLICT", requestId });
     return;
   }
 

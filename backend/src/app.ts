@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { httpLogger } from "./logger";
 import { config } from "./config";
+import { requestTimeoutMiddleware } from "./lib/timeout";
 import { auditLogMiddleware } from "./api/middleware/audit-log.middleware";
 import { errorHandlerMiddleware } from "./api/middleware/errorHandler.middleware";
 import { notFoundMiddleware } from "./api/middleware/notFound.middleware";
@@ -76,9 +77,6 @@ export function createApp(): express.Application {
 
   // #1221: Mount oracle routes (X-Oracle-Key auth on submit, X-Admin-Key on results).
   app.use("/api/oracle", oracleRoutes);
-
-  // #1249: Mount leaderboard routes (rank bettors by realised profit / win rate).
-  app.use("/api/leaderboard", leaderboardRoutes);
 
   // B-37: Swagger UI — dev mode only (Issue #1095)
   if (process.env.NODE_ENV !== "production") {

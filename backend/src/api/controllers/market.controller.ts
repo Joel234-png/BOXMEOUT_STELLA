@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import { MarketStatus } from "@prisma/client";
 import { z } from "zod";
-import { logger } from "../../logger";
+import { logger, sanitizeErrorForLog } from "../../logger";
+import { isUniqueConstraintError } from "../../lib/prisma-errors";
 import * as marketService from "../../services/market.service";
 import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";

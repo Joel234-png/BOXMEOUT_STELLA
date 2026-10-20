@@ -10,6 +10,7 @@ import {
   createMarketSchema,
 } from "../controllers/market.controller";
 import { walletAuthMiddleware } from "../middleware/walletAuth.middleware";
+import { idempotencyMiddleware } from "../middleware/idempotency.middleware";
 import { validate } from "../middleware/validate";
 import { subscribeToMarket, type MarketEventPayload } from "../../events/marketEvents";
 
@@ -25,10 +26,12 @@ router.get("/", getMarketsHandler);
 
 // POST /api/markets
 // Creator must prove wallet ownership via challenge/response (#1225 B-47).
-// Body is validated with zod before the handler runs.
+// Optional Idempotency-Key (B-103) makes client retries safe; it runs after auth
+// so keys are scoped to the wallet. Body is validated with zod before the handler.
 router.post(
   "/",
   walletAuthMiddleware(),
+  idempotencyMiddleware(),
   validate({ body: createMarketSchema }),
   createMarketHandler,
 );
