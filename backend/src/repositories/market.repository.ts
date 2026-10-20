@@ -1,7 +1,6 @@
-import { PrismaClient } from "@prisma/client";
 import Redis from "ioredis";
+import { db as prisma } from "../db";
 
-const prisma = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
 
 const CACHE_TTL = 10; // seconds
