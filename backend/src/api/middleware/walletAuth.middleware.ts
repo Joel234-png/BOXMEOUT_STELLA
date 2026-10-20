@@ -198,3 +198,19 @@ export function walletAuthMiddleware(options: WalletAuthOptions = {}) {
     next();
   };
 }
+
+/**
+ * Must follow `walletAuthMiddleware` on routes keyed by `:address`. Rejects
+ * with 403 unless the authenticated wallet is the address in the path, so a
+ * valid signature from one wallet cannot act on another wallet's resource.
+ */
+export function requireOwnAddress(req: Request, res: Response, next: NextFunction): void {
+  const authenticated = (req as Request & { walletAddress?: string }).walletAddress;
+
+  if (!authenticated || authenticated !== req.params.address) {
+    res.status(403).json({ error: "Wallet does not own this address", code: "FORBIDDEN" });
+    return;
+  }
+
+  next();
+}

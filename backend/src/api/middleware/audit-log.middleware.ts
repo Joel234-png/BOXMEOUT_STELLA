@@ -1,5 +1,8 @@
 import { Request, Response, NextFunction } from "express";
-import { db as prisma } from "../../db";
+import { Prisma, PrismaClient } from "@prisma/client";
+import { logger } from "../../logger";
+
+const prisma = new PrismaClient();
 
 // Paths that should trigger audit logging
 const AUDIT_PATHS = [/^\/api\/admin/, /^\/api\/wallet\/withdraw/, /^\/api\/disputes/];
@@ -67,13 +70,17 @@ function sanitizeBody(body: unknown): unknown {
  * Prefers the verified auth context over client-supplied headers.
  */
 function extractActor(req: Request): string {
-  const user = (req as any).user;
+  const authed = req as Request & {
+    user?: { id?: string; userId?: string; sub?: string };
+    userId?: string;
+  };
+  const headerUserId = req.headers["x-user-id"];
   const actor =
-    user?.id ||
-    user?.userId ||
-    user?.sub ||
-    (req as any).userId ||
-    req.headers["x-user-id"] ||
+    authed.user?.id ||
+    authed.user?.userId ||
+    authed.user?.sub ||
+    authed.userId ||
+    (typeof headerUserId === "string" ? headerUserId : undefined) ||
     "unknown";
 
   return String(actor);
@@ -170,20 +177,20 @@ export function auditLogMiddleware(
           actor,
           action,
           targetId,
-          diff: diff as any,
+          diff: diff as Prisma.InputJsonValue,
           ipAddress,
           method,
           path,
           requestBody:
             requestBody && Object.keys(requestBody as object).length > 0
-              ? (requestBody as any)
+              ? (requestBody as Prisma.InputJsonValue)
               : null,
           statusCode,
           timestamp: new Date(),
         },
       })
       .catch((err) => {
-        console.error("Failed to write audit log:", err);
+        logger.error({ err }, "Failed to write audit log");
       });
 
     return originalSend.call(this, data);
