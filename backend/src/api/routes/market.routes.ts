@@ -12,6 +12,7 @@ import {
 import { walletAuthMiddleware } from "../middleware/walletAuth.middleware";
 import { idempotencyMiddleware } from "../middleware/idempotency.middleware";
 import { validate } from "../middleware/validate";
+import { subscribeToMarket, type MarketEventPayload } from "../../events/marketEvents";
 
 const router = Router();
 
@@ -37,8 +38,6 @@ router.post(
 
 // GET /api/markets/:id/stream — Server-Sent Events for live pool/status updates
 router.get("/:id/stream", (req: Request, res: Response) => {
-  const { id } = req.params;
-
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -53,11 +52,13 @@ router.get("/:id/stream", (req: Request, res: Response) => {
   // Initial comment so clients/proxies open the stream immediately.
   res.write(": connected\n\n");
 
-  const onPoolChange = (payload: unknown) => send("pool", payload);
-  const onStatusChange = (payload: unknown) => send("status", payload);
+  // Map internal bus event types onto the SSE event names clients subscribe to.
+  const onMarketEvent = (payload: MarketEventPayload) => {
+    if (payload.type === "pool_updated") send("pool", payload.data);
+    else if (payload.type === "status_changed") send("status", payload.data);
+  };
 
-  marketEvents.on("pool", onPoolChange);
-  marketEvents.on("status", onStatusChange);
+  const unsubscribe = subscribeToMarket(id, onMarketEvent);
 
   const heartbeat = setInterval(() => {
     res.write(": heartbeat\n\n");
@@ -65,8 +66,7 @@ router.get("/:id/stream", (req: Request, res: Response) => {
 
   const cleanup = () => {
     clearInterval(heartbeat);
-    marketEvents.off("pool", onPoolChange);
-    marketEvents.off("status", onStatusChange);
+    unsubscribe();
   };
 
   req.on("close", cleanup);

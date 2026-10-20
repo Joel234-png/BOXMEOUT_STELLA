@@ -22,17 +22,9 @@ const app = createApp();
 
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
-  startResolutionService();
-  startRetentionService().catch((err) =>
-    logger.error({ err }, "failed to start retention service"),
+  startResolutionService().catch((err) =>
+    logger.error({ err }, "Failed to start resolution service")
   );
-});
-
-// B-102: explicit header, request and keep-alive limits on the HTTP server
-applyServerTimeouts(server, {
-  keepAliveTimeoutMs: config.SERVER_KEEP_ALIVE_TIMEOUT_MS,
-  headersTimeoutMs: config.SERVER_HEADERS_TIMEOUT_MS,
-  requestTimeoutMs: config.SERVER_REQUEST_TIMEOUT_MS,
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
@@ -72,8 +64,8 @@ async function shutdown(signal: string): Promise<void> {
     );
     logger.info("HTTP server closed");
 
-    // 2. Stop the resolution cron job.
-    stopResolutionService();
+    // 2. Remove the repeatable lifecycle jobs and close their worker.
+    await stopResolutionService();
     logger.info("Resolution service stopped");
 
     // 2b. Stop the daily retention job (waits for an in-flight prune to finish).

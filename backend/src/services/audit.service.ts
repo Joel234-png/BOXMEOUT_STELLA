@@ -1,4 +1,4 @@
-import { db as prisma } from "../db";
+import { Prisma, PrismaClient } from "@prisma/client";
 
 /** Rows deleted per statement, so a large backlog never holds one long delete. */
 export const PRUNE_BATCH_SIZE = 1000;
@@ -38,7 +38,7 @@ const REDACTED_PLACEHOLDER = "[REDACTED]";
  * Recursively redact secret-looking fields from an arbitrary value so that
  * request bodies can be safely persisted in audit rows.
  */
-export function redactSecrets(value: any): any {
+export function redactSecrets(value: unknown): unknown {
   if (value === null || value === undefined) {
     return value;
   }
@@ -48,7 +48,7 @@ export function redactSecrets(value: any): any {
   }
 
   if (typeof value === "object") {
-    const result: Record<string, any> = {};
+    const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
       if (REDACTED_KEYS.includes(key.toLowerCase())) {
         result[key] = REDACTED_PLACEHOLDER;
@@ -65,7 +65,7 @@ export function redactSecrets(value: any): any {
 /**
  * Build a JSON diff (before/after) for an admin action, redacting secrets.
  */
-export function buildAuditDiff(before: any, after: any) {
+export function buildAuditDiff(before: unknown, after: unknown) {
   return {
     before: redactSecrets(before ?? null),
     after: redactSecrets(after ?? null),
@@ -80,7 +80,7 @@ export async function getAuditLogs(query: AuditLogQuery) {
   const limit = Math.min(100, Math.max(1, query.limit || 20));
   const skip = (page - 1) * limit;
 
-  const where: any = {};
+  const where: Prisma.AuditLogWhereInput = {};
 
   if (query.userId) {
     where.userId = query.userId;
@@ -93,13 +93,14 @@ export async function getAuditLogs(query: AuditLogQuery) {
   }
 
   if (query.startDate || query.endDate) {
-    where.timestamp = {};
+    const timestamp: Prisma.DateTimeFilter = {};
     if (query.startDate) {
-      where.timestamp.gte = query.startDate;
+      timestamp.gte = query.startDate;
     }
     if (query.endDate) {
-      where.timestamp.lte = query.endDate;
+      timestamp.lte = query.endDate;
     }
+    where.timestamp = timestamp;
   }
 
   const [logs, total] = await Promise.all([

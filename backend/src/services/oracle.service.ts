@@ -13,6 +13,8 @@ import { Queue, Worker, Job } from "bullmq";
 import { logger } from "../logger";
 import { ContractError } from "../errors";
 import { db as prisma } from "../db";
+import { z } from "zod";
+import { createProviderClient } from "./external-provider.client";
 const RPC_URL = process.env.STELLAR_RPC_URL!;
 const NETWORK = process.env.STELLAR_NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY!;
@@ -43,6 +45,17 @@ export const resolutionQueue = new Queue("oracle-resolution", {
 export function resolutionJobId(marketId: string): string {
   return `resolve_market:${marketId}`;
 }
+
+/** B-113 / #1411: timeouts, retries and circuit breaking for the BoxRec feed. */
+const boxrecClient = createProviderClient({ name: "boxrec" });
+
+const BoxRecFightSchema = z.object({
+  id: z.string().min(1),
+  winner: z.string().min(1),
+  method: z.string(),
+  round: z.number().int().nonnegative(),
+  reportedAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)), "invalid date"),
+});
 
 export interface ExternalFightResult {
   matchId: string;
@@ -177,6 +190,7 @@ export async function confirmFightResult(
     include: { market: true },
   });
   if (!oracleResult) throw new Error(`OracleResult not found: ${oracle_result_id}`);
+  logger.info({ oracle_result_id, admin }, "oracle result confirmed");
 
   await enqueueResolution(oracleResult.marketId, oracleResult.outcome);
 }
@@ -328,28 +342,12 @@ export async function fetchExternalResult(
 
   const url = `${BOXREC_API_URL}/fights?fighterA=${encodeURIComponent(fighterA.name)}&fighterB=${encodeURIComponent(fighterB.name)}&date=${fightDate}`;
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      headers: { Authorization: `Bearer ${process.env.ORACLE_API_KEY}` },
-    });
-  } catch (err) {
-    throw new Error(`Network error querying BoxRec: ${(err as Error).message}`);
-  }
-
-  if (res.status === 404) return null;
-
-  if (!res.ok) {
-    throw new Error(`BoxRec API error: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json() as {
-    id: string;
-    winner: string;
-    method: string;
-    round: number;
-    reportedAt: string;
-  };
+  const data = await boxrecClient.getJson(
+    url,
+    { headers: { Authorization: `Bearer ${process.env.ORACLE_API_KEY}` } },
+    BoxRecFightSchema,
+  );
+  if (!data) return null;
 
   const winnerMap: Record<string, ExternalFightResult["winner"]> = {
     [fighterA.name]: "FighterA",
@@ -386,7 +384,7 @@ export async function listPendingResolutions(): Promise<Market[]> {
 }
 
 /**
- * Records a dispute in DB and submits raise_dispute() on-chain.
+ * Records a dispute in DB and submits dispute_resolution() on-chain.
  * Notifies admin via internal alert.
  */
 export async function raiseDispute(
