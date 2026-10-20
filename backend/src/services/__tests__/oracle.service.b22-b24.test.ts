@@ -16,6 +16,12 @@ jest.mock("../../logger", () => ({
   },
 }));
 
+// ── Mock bullmq so module load does not open Redis connections ────────────
+jest.mock("bullmq", () => ({
+  Queue: jest.fn().mockImplementation(() => ({ getJob: jest.fn(), add: jest.fn() })),
+  Worker: jest.fn().mockImplementation(() => ({ on: jest.fn() })),
+}));
+
 // ── Mock @stellar/stellar-sdk to avoid loading the heavy SDK ──────────────
 jest.mock("@stellar/stellar-sdk", () => ({
   SorobanRpc: { Server: jest.fn() },

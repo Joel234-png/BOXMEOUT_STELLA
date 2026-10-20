@@ -4,6 +4,7 @@ import { httpLogger } from "./logger";
 import { config } from "./config";
 import { auditLogMiddleware } from "./api/middleware/audit-log.middleware";
 import { errorHandlerMiddleware } from "./api/middleware/errorHandler.middleware";
+import { notFoundMiddleware } from "./api/middleware/notFound.middleware";
 import { requestIdMiddleware } from "./api/middleware/requestId.middleware";
 import { securityHeadersMiddleware } from "./api/middleware/securityHeaders.middleware";
 import { metricsRouter, httpRequestDuration } from "./metrics";
@@ -83,6 +84,9 @@ export function createApp(): express.Application {
   if (process.env.NODE_ENV !== "production") {
     app.use("/docs", docsRoutes);
   }
+
+  // B-93: unmatched requests get a JSON 404 instead of Express's HTML default
+  app.use(notFoundMiddleware);
 
   app.use(errorHandlerMiddleware);
 

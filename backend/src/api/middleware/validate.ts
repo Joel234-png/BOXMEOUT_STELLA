@@ -29,3 +29,32 @@ export function validateParam(
     next();
   };
 }
+
+/**
+ * Validates request parts against zod schemas. On success the parsed values
+ * replace the originals so handlers receive coerced/defaulted data.
+ * Responds with 400 VALIDATION_ERROR and zod's flattened issues on failure.
+ */
+export function validate(schemas: {
+  body?: ZodTypeAny;
+  query?: ZodTypeAny;
+  params?: ZodTypeAny;
+}) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    for (const part of ["body", "query", "params"] as const) {
+      const schema = schemas[part];
+      if (!schema) continue;
+      const result = schema.safeParse(req[part]);
+      if (!result.success) {
+        res.status(400).json({
+          error: "Validation failed",
+          code: "VALIDATION_ERROR",
+          details: result.error.flatten(),
+        });
+        return;
+      }
+      (req as unknown as Record<string, unknown>)[part] = result.data;
+    }
+    next();
+  };
+}

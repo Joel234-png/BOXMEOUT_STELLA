@@ -2,6 +2,10 @@ import { Router } from "express";
 import {
   submitOracleResultHandler,
   listOracleResultsHandler,
+  getAllOraclesHandler,
+  createOracleHandler,
+  updateOracleHandler,
+  deleteOracleHandler,
 } from "../controllers/oracle.controller";
 import { oracleAuth } from "../middleware/oracleAuth";
 import { adminAuth } from "../middleware/adminAuth";
