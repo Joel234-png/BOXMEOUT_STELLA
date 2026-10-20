@@ -7,6 +7,12 @@ import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";
 import { db } from "../../db";
 
+/** Admin identity from the auth context, falling back to a generic label. */
+function adminIdFromRequest(req: Request): string {
+  const authed = req as Request & { user?: { id?: string }; admin?: string };
+  return authed.user?.id || authed.admin || "admin";
+}
+
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
 const marketsQuerySchema = z.object({
@@ -133,8 +139,8 @@ export async function getMarketOddsHistoryHandler(
       parsed.data.interval
     );
     res.json({ data: snapshots });
-  } catch (err: any) {
-    if (err?.code === "NOT_FOUND") {
+  } catch (err) {
+    if ((err as { code?: string })?.code === "NOT_FOUND") {
       res.status(404).json({ error: "Market not found" });
       return;
     }
@@ -178,8 +184,8 @@ export async function getMarketStatsHandler(req: Request, res: Response): Promis
   try {
     const stats = await marketService.getMarketStats(req.params.id);
     res.json({ data: stats });
-  } catch (err: any) {
-    if (err?.code === "NOT_FOUND") {
+  } catch (err) {
+    if ((err as { code?: string })?.code === "NOT_FOUND") {
       res.status(404).json({ error: "Market not found" });
       return;
     }
@@ -225,20 +231,18 @@ export async function resolveMarketHandler(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const parsed = resolveMarketBodySchema.safeParse(req.body ?? {});
-  if (!parsed.success) {
-    res.status(400).json({
-      error: "Validation failed",
-      code: "VALIDATION_ERROR",
-      details: parsed.error.flatten(),
-    });
-    return;
-  }
-
   try {
-    const admin = (req as any).user?.id || "admin";
-    await oracleService.confirmFightResult(String(parsed.data.oracle_result_id), admin);
-    res.status(200).json({ status: "ok" });
+    const { oracle_result_id } = req.body;
+
+    if (typeof oracle_result_id !== "string" || oracle_result_id.length === 0) {
+      res
+        .status(400)
+        .json({ error: "oracle_result_id is required", code: "VALIDATION_ERROR" });
+      return;
+    }
+
+    await oracleService.confirmFightResult(oracle_result_id, adminIdFromRequest(req));
+    res.status(200).json({ message: "Oracle result confirmed; on-chain resolution enqueued" });
   } catch (err) {
     next(err);
   }
@@ -272,7 +276,7 @@ export async function resolveDisputeHandler(
       return;
     }
 
-    const admin = (req as any).user?.id || (req as any).admin || "admin";
+    const admin = adminIdFromRequest(req);
 
     await oracleService.resolveDispute(String(targetDisputeId), outcome, admin);
     const result = { disputeId: String(targetDisputeId), outcome, notes: String(notesText) };
@@ -280,6 +284,80 @@ export async function resolveDisputeHandler(
     res.status(200).json({ success: true, status: "ok", data: result });
   } catch (err) {
     next(err);
+  }
+}
+
+/**
+ * POST /api/admin/markets/:marketId/resolve
+ * Body: { outcome, source }
+ * Admin-protected. Resolves a market by ID and writes an audit log entry.
+ */
+export async function resolveMarketByIdHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const { marketId } = req.params;
+    const { outcome, source } = req.body;
+
+    if (!outcome || !VALID_OUTCOMES.includes(outcome)) {
+      res.status(400).json({
+        error: "Invalid or missing outcome",
+        code: "INVALID_OUTCOME",
+        allowed: VALID_OUTCOMES,
+      });
+      return;
+    }
+
+    if (!source) {
+      res.status(400).json({ error: "Missing source", code: "MISSING_SOURCE" });
+      return;
+    }
+
+    const market = await marketService.resolveMarket(marketId, outcome, source, "admin");
+    res.status(200).json({ market, message: "Market resolved successfully" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to resolve market", code: "INTERNAL_ERROR" });
+  }
+}
+
+/**
+ * POST /api/admin/markets/:marketId/cancel
+ * Body: { reason? }
+ * Admin-protected. Cancels a market and writes an audit log entry.
+ */
+export async function cancelMarketHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const { marketId } = req.params;
+    const { reason } = req.body;
+
+    const market = await marketService.cancelMarket(marketId, "admin", reason);
+    res.status(200).json({ market, message: "Market cancelled" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to cancel market", code: "INTERNAL_ERROR" });
+  }
+}
+
+/**
+ * POST /api/admin/markets/:marketId/dispute-resolve
+ * Body: { overrideOutcome, resolution? }
+ * Admin-protected. Resolves a disputed market with an override and writes an audit log entry.
+ */
+export async function resolveDisputeByIdHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const { marketId } = req.params;
+    const { overrideOutcome, resolution } = req.body;
+
+    if (!overrideOutcome || !VALID_OUTCOMES.includes(overrideOutcome)) {
+      res.status(400).json({
+        error: "Invalid or missing overrideOutcome",
+        code: "INVALID_OUTCOME",
+        allowed: VALID_OUTCOMES,
+      });
+      return;
+    }
+
+    const market = await marketService.resolveMarketDispute(marketId, overrideOutcome, "admin", resolution);
+    res.status(200).json({ market, message: "Dispute resolved" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to resolve dispute", code: "INTERNAL_ERROR" });
   }
 }
 

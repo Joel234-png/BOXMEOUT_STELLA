@@ -35,8 +35,6 @@ router.post(
 
 // GET /api/markets/:id/stream — Server-Sent Events for live pool/status updates
 router.get("/:id/stream", (req: Request, res: Response) => {
-  const { id } = req.params;
-
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");

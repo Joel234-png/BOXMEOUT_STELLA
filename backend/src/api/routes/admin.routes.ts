@@ -11,6 +11,7 @@ import {
   deleteOracleHandler,
 } from "../controllers/oracle.controller";
 import { getAuditLogsHandler } from "../controllers/audit.controller";
+import { reconcileMarketHandler } from "../controllers/market-reconciliation.controller";
 import {
   getFailedSubmissionsHandler,
   retryFailedSubmissionHandler,
@@ -53,6 +54,8 @@ const oracleSubmissionLimiter = rateLimitMiddleware({
 router.get("/markets/pending", getPendingResolutionsHandler);
 router.post("/markets/resolve", marketResolutionLimiter, resolveMarketHandler);
 router.post("/markets/dispute/resolve", marketResolutionLimiter, resolveDisputeHandler);
+// #1412: reconcile one market against on-chain state (report-only unless autoRepair).
+router.post("/markets/:id/reconcile", reconcileMarketHandler);
 
 // Oracle address management (Issue #455)
 router.get("/oracles", getAllOraclesHandler);

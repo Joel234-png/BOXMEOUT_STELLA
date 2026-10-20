@@ -31,8 +31,17 @@ import {
 } from "@stellar/stellar-sdk";
 import { MarketStatus } from "@prisma/client";
 import { Queue, Worker, Job } from "bullmq";
+import type { Counter } from "prom-client";
+import { randomUUID } from "crypto";
 import { db } from "../db";
 import { logger } from "../logger";
+import { redis } from "../lib/redis";
+import {
+  lockJobSuccess,
+  lockJobFailure,
+  finalizeJobSuccess,
+  finalizeJobFailure,
+} from "../metrics";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -354,9 +363,151 @@ async function autoFinalizeExpiredWindows(): Promise<void> {
   );
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── Scheduled lifecycle jobs (B-111) ─────────────────────────────────────────
 
-/** Interval handle so the jobs can be stopped in tests. */
-let
+/** BullMQ queue that carries the repeatable market lifecycle jobs. */
+export const LIFECYCLE_QUEUE = "market-lifecycle";
+export const LOCK_JOB_NAME = "enforce-market-locks";
+export const FINALIZE_JOB_NAME = "auto-finalize-expired-windows";
 
-/* … truncated 1363 chars — edit only what you need near the top … */
+/** How often each lifecycle job runs. Defaults to one minute. */
+export const LIFECYCLE_INTERVAL_MS = parseInt(
+  process.env.LIFECYCLE_JOB_INTERVAL_MS ?? "60000",
+  10
+);
+
+/**
+ * TTL of the cross-replica single-flight lock. Longer than any single run so
+ * the lock cannot expire while the holder is still working.
+ */
+const SINGLE_FLIGHT_TTL_MS = 5 * 60_000;
+
+/** Deletes the lock only if this run still owns it (compare-and-delete). */
+const RELEASE_LOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+end
+return 0
+`;
+
+/**
+ * Queue that holds the repeatable lifecycle jobs. Job schedulers keep exactly
+ * one scheduled job per name in Redis, so registering on every replica is
+ * idempotent: each tick produces one job, and any replica's worker may take it.
+ */
+export const lifecycleQueue = new Queue(LIFECYCLE_QUEUE, {
+  connection: REDIS_CONNECTION,
+});
+
+let lifecycleWorker: Worker | null = null;
+
+/**
+ * Runs `fn` only if no other replica currently holds the lock for `name`.
+ * Returns false when the lock is held elsewhere, so an overlapping tick is
+ * skipped instead of processing the same markets twice.
+ */
+export async function runSingleFlight(
+  name: string,
+  fn: () => Promise<void>
+): Promise<boolean> {
+  const key = `lifecycle-lock:${name}`;
+  const token = randomUUID();
+
+  const acquired = await redis.set(key, token, "PX", SINGLE_FLIGHT_TTL_MS, "NX");
+  if (acquired !== "OK") return false;
+
+  try {
+    await fn();
+  } finally {
+    await redis.eval(RELEASE_LOCK_SCRIPT, 1, key, token);
+  }
+  return true;
+}
+
+/**
+ * Dispatches a lifecycle job to its handler, runs it under the single-flight
+ * lock, and records the outcome in the job counters.
+ */
+export async function processLifecycleJob(job: Job): Promise<void> {
+  switch (job.name) {
+    case LOCK_JOB_NAME:
+      return runTrackedJob(LOCK_JOB_NAME, lockJobSuccess, lockJobFailure, enforceMarketLocks);
+    case FINALIZE_JOB_NAME:
+      return runTrackedJob(
+        FINALIZE_JOB_NAME,
+        finalizeJobSuccess,
+        finalizeJobFailure,
+        autoFinalizeExpiredWindows
+      );
+    default:
+      throw new Error(`unknown lifecycle job: ${job.name}`);
+  }
+}
+
+async function runTrackedJob(
+  name: string,
+  success: Counter<string>,
+  failure: Counter<string>,
+  fn: () => Promise<void>
+): Promise<void> {
+  try {
+    const ran = await runSingleFlight(name, fn);
+    if (!ran) {
+      logger.debug({ job: name }, "lifecycle job skipped: another replica is running it");
+      return;
+    }
+    success.inc();
+  } catch (err) {
+    failure.inc();
+    throw err;
+  }
+}
+
+/**
+ * Registers the repeatable lifecycle jobs and starts the worker that runs
+ * them. Safe to call on every replica at startup.
+ */
+export async function startResolutionService(): Promise<void> {
+  for (const name of [LOCK_JOB_NAME, FINALIZE_JOB_NAME]) {
+    await lifecycleQueue.upsertJobScheduler(
+      name,
+      { every: LIFECYCLE_INTERVAL_MS },
+      { name, data: {} }
+    );
+  }
+
+  if (!lifecycleWorker) {
+    // Concurrency 1: a replica never runs two lifecycle jobs at once.
+    lifecycleWorker = new Worker(LIFECYCLE_QUEUE, processLifecycleJob, {
+      connection: REDIS_CONNECTION,
+      concurrency: 1,
+    });
+    lifecycleWorker.on("failed", (job, err) => {
+      logger.error({ err, job: job?.name }, "lifecycle job failed");
+    });
+  }
+
+  logger.info(
+    { intervalMs: LIFECYCLE_INTERVAL_MS },
+    "ResolutionService started (enforceMarketLocks + autoFinalizeExpiredWindows)"
+  );
+}
+
+/**
+ * Removes the repeatable lifecycle jobs and closes the worker. Called on
+ * graceful shutdown.
+ */
+export async function stopResolutionService(): Promise<void> {
+  for (const name of [LOCK_JOB_NAME, FINALIZE_JOB_NAME]) {
+    await lifecycleQueue.removeJobScheduler(name);
+  }
+
+  if (lifecycleWorker) {
+    await lifecycleWorker.close();
+    lifecycleWorker = null;
+  }
+  logger.info("ResolutionService stopped");
+}
+
+// Export internal functions for unit testing
+export { enforceMarketLocks, autoFinalizeExpiredWindows };
