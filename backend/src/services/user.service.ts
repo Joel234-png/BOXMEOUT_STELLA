@@ -69,3 +69,13 @@ export async function updateUser(
     updatedAt: new Date(),
   };
 }
+
+/**
+ * Cursor-paginated bets placed by a wallet, ordered by (placedAt, id) descending.
+ */
+export async function getUserBets(
+  address: string,
+  options?: { cursor?: string | null; limit?: number | string | null }
+): Promise<PaginatedBets> {
+  return getBetsByAddressPaginated(address, options);
+}

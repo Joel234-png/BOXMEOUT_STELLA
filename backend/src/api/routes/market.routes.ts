@@ -1,25 +1,33 @@
 import { Router, type Request, type Response } from "express";
+import { searchMarketsHandler } from "../controllers/marketSearch.controller";
 import {
-  searchMarketsHandler,
   getMarketsHandler,
   getMarketByIdHandler,
   getMarketStatsHandler,
   getMarketBetsHandler,
   getMarketOddsHistoryHandler,
   createMarketHandler,
-  createMarketSchema,
 } from "../controllers/market.controller";
+import { createMarketSchema } from "../schemas/market.schema";
 import { walletAuthMiddleware } from "../middleware/walletAuth.middleware";
 import { idempotencyMiddleware } from "../middleware/idempotency.middleware";
 import { validate } from "../middleware/validate";
 import { subscribeToMarket, type MarketEventPayload } from "../../events/marketEvents";
 
+// B-99 (#1397): search is unauthenticated and runs a full-text query per call,
+// so it gets the shared Redis sliding-window limiter.
+const searchRateLimiter = rateLimitMiddleware({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyPrefix: "markets:search",
+});
+
 const router = Router();
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
-// GET /api/markets/search?q=...  — must come before /:id
-router.get("/search", searchMarketsHandler);
+// GET /api/markets/search?q=...  — must come before /:id (#1405 B-107)
+router.get("/search", searchRateLimiter, searchMarketsHandler);
 
 // GET  /api/markets
 router.get("/", getMarketsHandler);
@@ -33,6 +41,7 @@ router.post(
   walletAuthMiddleware(),
   idempotencyMiddleware(),
   validate({ body: createMarketSchema }),
+  enforceCreatorBinding,
   createMarketHandler,
 );
 

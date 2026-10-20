@@ -12,17 +12,12 @@ const stellarAddressSchema = z
   .string()
   .regex(/^G[A-Z0-9]{55}$/, "Invalid Stellar address");
 
-const betsByAddressQuerySchema = z.object({
+const betsByAddressQuerySchema = pageQuerySchema.extend({
   status: z.enum(["pending", "won", "lost", "claimed"]).optional(),
   marketId: z.string().optional(),
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-const positionsQuerySchema = z.object({
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
-});
+const positionsQuerySchema = pageQuerySchema;
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -78,14 +73,6 @@ export async function getPortfolioHandler(
   } catch (err) {
     next(err);
   }
-}
-
-/**
- * GET /api/users/:address/bets   (#1088)
- * Alias route — same as /api/bets/:address but under /users path.
- */
-export async function getUserBetsHandler(req: Request, res: Response): Promise<void> {
-  return getBetsByAddressHandler(req, res);
 }
 
 /**

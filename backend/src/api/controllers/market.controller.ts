@@ -4,7 +4,6 @@ import { z } from "zod";
 import { logger, sanitizeErrorForLog } from "../../logger";
 import { isUniqueConstraintError } from "../../lib/prisma-errors";
 import * as marketService from "../../services/market.service";
-import { searchMarkets } from "../../repositories/market.repository";
 import * as oracleService from "../../services/oracle.service";
 import { db } from "../../db";
 import { ok, fail } from "../response";
@@ -17,11 +16,9 @@ function adminIdFromRequest(req: Request): string {
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
-const marketsQuerySchema = z.object({
+const marketsQuerySchema = pageQuerySchema.extend({
   status: z.nativeEnum(MarketStatus).optional(),
   weightClass: z.string().optional(),
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
 const marketBetsQuerySchema = z.object({
@@ -83,7 +80,7 @@ export async function getMarketsHandler(req: Request, res: Response): Promise<vo
 
   try {
     const { status, weightClass, page, limit } = parsed.data;
-    const markets = await marketService.getAllMarkets(
+    const { data, total } = await marketService.getAllMarkets(
       { status, weightClass },
       { page, pageSize: limit }
     );

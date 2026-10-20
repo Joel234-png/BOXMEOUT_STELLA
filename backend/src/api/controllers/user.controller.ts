@@ -49,17 +49,22 @@ export async function updateUserHandler(req: Request, res: Response): Promise<vo
  * Query: ?cursor=&limit= (max 100). Ordered stably by (placedAt, id).
  */
 export async function getUserBetsHandler(req: Request, res: Response): Promise<void> {
+  const parsed = cursorQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Validation failed",
+      code: "VALIDATION_ERROR",
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+
   try {
     const { address } = req.params;
-    const { cursor } = req.query;
-
-    const parsedLimit = Number.parseInt(String(req.query.limit ?? ""), 10);
-    const limit = Number.isNaN(parsedLimit)
-      ? DEFAULT_LIMIT
-      : Math.min(Math.max(parsedLimit, 1), MAX_LIMIT);
+    const { cursor, limit } = parsed.data;
 
     const { bets, nextCursor } = await userService.getUserBets(address, {
-      cursor: typeof cursor === "string" && cursor.length > 0 ? cursor : undefined,
+      cursor: cursor || undefined,
       limit,
     });
 
